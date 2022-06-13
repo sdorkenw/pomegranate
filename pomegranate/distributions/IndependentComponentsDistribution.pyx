@@ -5,7 +5,6 @@
 # Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
 import numpy
-import json
 
 from libc.stdlib cimport calloc
 from libc.stdlib cimport free
@@ -124,7 +123,7 @@ cdef class IndependentComponentsDistribution(MultivariateDistribution):
 			else:
 				n = len(X)
 
-			X_ndarray = numpy.array(X, dtype='float64')
+			X_ndarray = numpy.asarray(X, dtype='float64')
 			X_ptr = <double*> X_ndarray.data
 
 			logp_array = numpy.empty(n, dtype='float64')
@@ -197,7 +196,16 @@ cdef class IndependentComponentsDistribution(MultivariateDistribution):
 		cdef numpy.npy_intp dim = n * self.d
 		cdef numpy.npy_intp n_elements = n
 
-		if self.cython == 1:
+		# Determine if the categories to summarize are still unknown in any of
+		# the distributions.
+		all_initialized = True
+		with gil:
+			for dist_i in self.distributions:
+				if getattr(dist_i, 'is_blank_', False):
+					all_initialized = False
+					break
+
+		if self.cython == 1 and all_initialized:
 			for i in range(d):
 				(<Model> self.distributions_ptr[i])._summarize(X, weights, n, 
 					i, d)
@@ -235,19 +243,16 @@ cdef class IndependentComponentsDistribution(MultivariateDistribution):
 		for d in self.parameters[0]:
 			d.clear_summaries()
 
-	def to_json(self, separators=(',', ' : '), indent=4):
-		"""Convert the distribution to JSON format."""
-
-		return json.dumps({
-								'class' : 'Distribution',
-								'name'  : self.name,
-								'parameters' : [[json.loads(dist.to_json()) for dist in self.parameters[0]],
-								                 self.parameters[1]],
-								'frozen' : self.frozen
-						   }, separators=separators, indent=indent)
+	def to_dict(self):
+		return {
+			'class' : 'Distribution',
+			'name'  : self.name,
+			'parameters' : [[dist.to_dict() for dist in self.parameters[0]], self.parameters[1]],
+			'frozen' : self.frozen
+		}
 
 	@classmethod
-	def from_samples(self, X, weights=None, distribution_weights=None,
+	def from_samples(cls, X, weights=None, distribution_weights=None,
 		pseudocount=0.0, distributions=None):
 		"""Create a new independent components distribution from data."""
 
@@ -262,5 +267,5 @@ cdef class IndependentComponentsDistribution(MultivariateDistribution):
 		else:
 			distributions = [distributions[i].from_samples(X[:,i], weights) for i in range(d)]
 
-		return IndependentComponentsDistribution(distributions, distribution_weights)
+		return cls(distributions, distribution_weights)
 

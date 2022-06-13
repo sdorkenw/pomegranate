@@ -10,9 +10,10 @@
 |
  
 .. image:: https://travis-ci.org/jmschrei/pomegranate.svg?branch=master
-	:target: https://travis-ci.org/jmschrei/pomegranate
+   :target: https://travis-ci.org/jmschrei/pomegranate
 
 .. image:: https://ci.appveyor.com/api/projects/status/github/jmschrei/pomegranate?svg=True
+   :target: https://ci.appveyor.com/project/JacobSchreiber/pomegranate/branch/master
 
 .. image:: https://readthedocs.org/projects/pomegranate/badge/?version=latest
    :target: http://pomegranate.readthedocs.io/en/latest/?badge=latest
@@ -56,8 +57,8 @@ Contributions are eagerly accepted! If you would like to contribute a feature th
 
    api.rst
    ooc.rst
+   io.rst
    semisupervised.rst
-   minibatch.rst
    parallelism.rst
    gpu.rst
    nan.rst
@@ -74,4 +75,5 @@ Contributions are eagerly accepted! If you would like to contribute a feature th
    NaiveBayes.rst
    MarkovChain.rst
    BayesianNetwork.rst
+   MarkovNetwork.rst
    FactorGraph.rst

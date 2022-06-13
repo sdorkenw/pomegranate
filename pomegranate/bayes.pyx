@@ -5,10 +5,8 @@
 
 from libc.stdlib cimport calloc
 from libc.stdlib cimport free
-from libc.string cimport memset
-from libc.math cimport exp as cexp
+from libc.stdlib cimport malloc
 
-import json
 import time
 
 import numpy
@@ -17,6 +15,7 @@ cimport numpy
 from .base cimport Model
 from distributions.distributions cimport Distribution
 from distributions import DiscreteDistribution
+from distributions import JointProbabilityTable
 from distributions import IndependentComponentsDistribution
 from .hmm import HiddenMarkovModel
 from .gmm import GeneralMixtureModel
@@ -28,6 +27,9 @@ from .utils cimport python_log_probability
 from .utils import _check_input
 from .utils import _convert
 from .utils import check_random_state
+
+from .io import BaseGenerator
+from .io import DataGenerator
 
 from joblib import Parallel
 from joblib import delayed
@@ -91,7 +93,7 @@ cdef class BayesModel(Model):
         if weights is None:
             weights = numpy.ones_like(distributions, dtype='float64') / self.n
         else:
-            weights = numpy.array(weights, dtype='float64') / sum(weights)
+            weights = numpy.asarray(weights, dtype='float64') / sum(weights)
 
         self.weights = numpy.log(weights)
         self.weights_ptr = <double*> self.weights.data
@@ -102,23 +104,32 @@ cdef class BayesModel(Model):
         self.summaries = numpy.zeros_like(weights, dtype='float64')
         self.summaries_ptr = <double*> self.summaries.data
 
-        dist = distributions[0]
-        if self.is_vl_ == 1:
-            pass
+        if self.is_vl_ == 0:
+            if isinstance(distributions[0], JointProbabilityTable):
+                self.cython = 0
+            else:
+                self._build_keymap()
 
-        elif isinstance(dist, DiscreteDistribution):
+    def _build_keymap(self):
+        """
+        Assemble keys of child distributions and bake encodings.
+        """
+        dist = self.distributions[0]
+
+        if isinstance(dist, DiscreteDistribution):
             keys = []
-            for distribution in distributions:
+            for distribution in self.distributions:
                 keys.extend(distribution.keys())
+            keys.sort()
             self.keymap = [{key: i for i, key in enumerate(keys)}]
-            for distribution in distributions:
+            for distribution in self.distributions:
                 distribution.bake(tuple(keys))
 
         elif isinstance(dist, IndependentComponentsDistribution):
             self.keymap = [{} for i in range(self.d)]
             keymap_tuples = [tuple() for i in range(self.d)]
 
-            for distribution in distributions:
+            for distribution in self.distributions:
                 for i in range(self.d):
                     if isinstance(distribution[i], DiscreteDistribution):
                         for key in distribution[i].keys():
@@ -126,18 +137,15 @@ cdef class BayesModel(Model):
                                 self.keymap[i][key] = len(self.keymap[i])
                                 keymap_tuples[i] += (key,)
 
-            for distribution in distributions:
+            for distribution in self.distributions:
                 for i in range(self.d):
                     d = distribution[i]
                     if isinstance(d, DiscreteDistribution):
-                        d.bake(keymap_tuples[i])
-
-        
+                        d.bake(tuple(sorted(keymap_tuples[i])))
 
     def __reduce__(self):
         return self.__class__, (self.distributions.tolist(),
-                                numpy.exp(self.weights),
-                                self.n)
+                                numpy.exp(self.weights))
 
     def sample(self, n=1, random_state=None):
         """Generate a sample from the model.
@@ -177,7 +185,7 @@ cdef class BayesModel(Model):
 
         return numpy.array(samples) if n > 1 else samples[0]
 
-    def log_probability(self, X, n_jobs=1):
+    def log_probability(self, X, n_jobs=1, batch_size=None):
         """Calculate the log probability of a point under the distribution.
 
         The probability of a point is the sum of the probabilities of each
@@ -194,10 +202,14 @@ cdef class BayesModel(Model):
             shape is (n, m, d) where m is variable length for each observation,
             and X becomes an array of n (m, d)-shaped arrays.
 
-        n_jobs : int
+        n_jobs : int, optional
             The number of jobs to use to parallelize, either the number of threads
             or the number of processes to use. -1 means use all available resources.
             Default is 1.
+
+        batch_size: int or None, optional
+            The size of the batches to make predictions on. Passing in None means
+            splitting the data set evenly among the number of jobs. Default is None.
 
         Returns
         -------
@@ -207,24 +219,30 @@ cdef class BayesModel(Model):
 
         cdef int i, j, n, d, m
 
-        if n_jobs > 1:
-            starts = [int(i*len(X)/n_jobs) for i in range(n_jobs)]
-            ends = [int(i*len(X)/n_jobs) for i in range(1, n_jobs+1)]
-
-            with Parallel(n_jobs=n_jobs, backend='threading') as parallel:
-                logp_arrays = parallel(delayed(self.log_probability, check_pickle=False)(
-                    X[start:end]) for start, end in zip(starts, ends))
-
-            return numpy.concatenate(logp_arrays)
-
         if self.is_vl_ or self.d == 1:
             n, d = len(X), self.d
         elif self.d > 1 and X.ndim == 1:
-            n, d = 1, len(X)
+            raise ValueError("Must pass in an array with at least two dimensions.")
         else:
             n, d = X.shape
 
-        cdef numpy.ndarray logp_ndarray = numpy.zeros(n)
+        if n_jobs > 1 or isinstance(X, BaseGenerator):
+            if batch_size is None:
+                batch_size = 1 if self.is_vl_ else n // n_jobs + n % n_jobs
+
+            if not isinstance(X, BaseGenerator):
+                data_generator = DataGenerator(X, batch_size=batch_size)
+            else:
+                data_generator = X
+
+            with Parallel(n_jobs=n_jobs, backend='threading') as parallel:
+                f = delayed(self.log_probability)
+                logp_array = parallel(f(batch[0]) for batch in 
+                    data_generator.batches())
+
+            return numpy.concatenate(logp_array)
+
+        cdef numpy.ndarray logp_ndarray = numpy.empty(n)
         cdef double* logp = <double*> logp_ndarray.data
 
         cdef numpy.ndarray X_ndarray
@@ -240,7 +258,7 @@ cdef class BayesModel(Model):
             if self.is_vl_:
                 for i in range(n):
                     with gil:
-                        X_ndarray = numpy.array(X[i])
+                        X_ndarray = numpy.asarray(X[i])
                         X_ptr = <double*> X_ndarray.data
                     logp[i] = self._vl_log_probability(X_ptr, n)
             else:
@@ -250,7 +268,7 @@ cdef class BayesModel(Model):
 
     cdef void _log_probability(self, double* X, double* log_probability, int n) nogil:
         cdef int i, j, d = self.d
-        cdef double* logp = <double*> calloc(n, sizeof(double))
+        cdef double* logp = <double*> malloc(n * sizeof(double))
 
         if self.cython == 1:
             (<Model> self.distributions_ptr[0])._log_probability(X, log_probability, n)
@@ -284,7 +302,7 @@ cdef class BayesModel(Model):
 
         return log_probability_sum
 
-    def predict_proba(self, X, n_jobs=1):
+    def predict_proba(self, X, n_jobs=1, batch_size=None):
         """Calculate the posterior P(M|D) for data.
 
         Calculate the probability of each item having been generated from
@@ -306,6 +324,10 @@ cdef class BayesModel(Model):
             or the number of processes to use. -1 means use all available resources.
             Default is 1.
 
+        batch_size: int or None, optional
+            The size of the batches to make predictions on. Passing in None means
+            splitting the data set evenly among the number of jobs. Default is None.
+
         Returns
         -------
         probability : array-like, shape (n_samples, n_components)
@@ -313,9 +335,10 @@ cdef class BayesModel(Model):
             probability that the sample was generated from each component.
         """
 
-        return numpy.exp(self.predict_log_proba(X, n_jobs=n_jobs))
+        return numpy.exp(self.predict_log_proba(X, n_jobs=n_jobs, 
+            batch_size=batch_size))
 
-    def predict_log_proba(self, X, n_jobs=1):
+    def predict_log_proba(self, X, n_jobs=1, batch_size=None):
         """Calculate the posterior log P(M|D) for data.
 
         Calculate the log probability of each item having been generated from
@@ -336,6 +359,10 @@ cdef class BayesModel(Model):
             or the number of processes to use. -1 means use all available resources.
             Default is 1.
 
+        batch_size: int or None, optional
+            The size of the batches to make predictions on. Passing in None means
+            splitting the data set evenly among the number of jobs. Default is None.
+
         Returns
         -------
         y : array-like, shape (n_samples, n_components)
@@ -350,15 +377,21 @@ cdef class BayesModel(Model):
         cdef numpy.ndarray y
         cdef double* y_ptr
 
-        if n_jobs > 1:
-            starts = [int(i*len(X)/n_jobs) for i in range(n_jobs)]
-            ends = [int(i*len(X)/n_jobs) for i in range(1, n_jobs+1)]
+        if n_jobs > 1 or isinstance(X, BaseGenerator):
+            if batch_size is None:
+                batch_size = 1 if self.is_vl_ else len(X) // n_jobs + len(X) % n_jobs
+
+            if not isinstance(X, BaseGenerator):
+                data_generator = DataGenerator(X, batch_size=batch_size)
+            else:
+                data_generator = X
 
             with Parallel(n_jobs=n_jobs, backend='threading') as parallel:
-                y_arrays = parallel(delayed(self.predict_log_proba, check_pickle=False)(
-                    X[start:end]) for start, end in zip(starts, ends))
+                f = delayed(self.predict_log_proba)
+                y_array = parallel(f(batch[0]) for batch in 
+                    data_generator.batches())
 
-            return numpy.concatenate(y_arrays)
+            return numpy.concatenate(y_array)
 
         if not self.is_vl_:
             X_ndarray = _check_input(X, self.keymap)
@@ -372,12 +405,6 @@ cdef class BayesModel(Model):
 
         y = numpy.zeros((n, self.n), dtype='float64')
         y_ptr = <double*> y.data
-
-        if not self.is_vl_:
-            X_ndarray = _check_input(X, self.keymap)
-            X_ptr = <double*> X_ndarray.data
-            if d != self.d:
-                raise ValueError("sample only has {} dimensions but should have {} dimensions".format(d, self.d))
 
         with nogil:
             if not self.is_vl_:
@@ -417,7 +444,7 @@ cdef class BayesModel(Model):
             for j in range(self.n):
                 y[j*n + i] -= y_sum
 
-    def predict(self, X, n_jobs=1):
+    def predict(self, X, n_jobs=1, batch_size=None):
         """Predict the most likely component which generated each sample.
 
         Calculate the posterior P(M|D) for each sample and return the index
@@ -438,6 +465,10 @@ cdef class BayesModel(Model):
             or the number of processes to use. -1 means use all available resources.
             Default is 1.
 
+        batch_size: int or None, optional
+            The size of the batches to make predictions on. Passing in None means
+            splitting the data set evenly among the number of jobs. Default is None.
+
         Returns
         -------
         y : array-like, shape (n_samples,)
@@ -451,15 +482,21 @@ cdef class BayesModel(Model):
         cdef numpy.ndarray y
         cdef int* y_ptr
 
-        if n_jobs > 1:
-            starts = [int(i*len(X)/n_jobs) for i in range(n_jobs)]
-            ends = [int(i*len(X)/n_jobs) for i in range(1, n_jobs+1)]
+        if n_jobs > 1 or isinstance(X, BaseGenerator):
+            if batch_size is None:
+                batch_size = 1 if self.is_vl_ else len(X) // n_jobs + len(X) % n_jobs
+
+            if not isinstance(X, BaseGenerator):
+                data_generator = DataGenerator(X, batch_size=batch_size)
+            else:
+                data_generator = X
 
             with Parallel(n_jobs=n_jobs, backend='threading') as parallel:
-                y_arrays = parallel(delayed(self.predict, check_pickle=False)(X[start:end])
-                    for start, end in zip(starts, ends))
+                f = delayed(self.predict)
+                y_array = parallel(f(batch[0]) for batch in 
+                    data_generator.batches())
 
-            return numpy.concatenate(y_arrays)
+            return numpy.concatenate(y_array)
 
         if not self.is_vl_:
             X_ndarray = _check_input(X, self.keymap)
@@ -515,7 +552,7 @@ cdef class BayesModel(Model):
 
         free(r)
 
-    def fit(self, X, y, weights=None, inertia=0.0, pseudocount=0.0,
+    def fit(self, X, y=None, weights=None, inertia=0.0, pseudocount=0.0,
         stop_threshold=0.1, max_iterations=1e8, callbacks=[],
         return_history=False, verbose=False, n_jobs=1):
         """Fit the Bayes classifier to the data by passing data to its components.
@@ -536,8 +573,8 @@ cdef class BayesModel(Model):
             For markov chains and HMMs this will be a list of variable length
             sequences.
 
-        y : numpy.ndarray or list or None, optional
-            Data labels for supervised training algorithms. Default is None
+        y : numpy.ndarray or list or None
+            Data labels for supervised training algorithms.
 
         weights : array-like or None, shape (n_samples,), optional
             The initial weights of each sample in the matrix. If nothing is
@@ -592,16 +629,16 @@ cdef class BayesModel(Model):
         training_start_time = time.time()
         total_improvement = 0
 
-        X = numpy.array(X, dtype='float64')
-        n, d = X.shape
-
-        if weights is None:
-            weights = numpy.ones(n, dtype='float64')
+        if not isinstance(X, BaseGenerator):
+            if y is None:
+                raise ValueError("Must pass in both X and y as arrays or a data generator for X.")
+                
+            batch_size = X.shape[0] // n_jobs + X.shape[0] % n_jobs
+            data_generator = DataGenerator(X, weights, y, batch_size=batch_size)
         else:
-            weights = numpy.array(weights, dtype='float64')
+            data_generator = X
 
-        starts = [int(i*len(X)/n_jobs) for i in range(n_jobs)]
-        ends = [int(i*len(X)/n_jobs) for i in range(1, n_jobs+1)]
+        n, d = data_generator.shape
 
         callbacks = [History()] + callbacks
         for callback in callbacks:
@@ -609,47 +646,30 @@ cdef class BayesModel(Model):
             callback.on_training_begin()
 
         with Parallel(n_jobs=n_jobs, backend='threading') as parallel:
-            parallel( delayed(self.summarize, check_pickle=False)(X[start:end],
-                y[start:end], weights[start:end]) for start, end in zip(starts, ends) )
-
+            f = delayed(self.summarize)
+            parallel(f(*batch) for batch in data_generator.batches())
             self.from_summaries(inertia, pseudocount)
+            self._build_keymap()
 
-            semisupervised = -1 in y
+            semisupervised = -1 in data_generator.classes
             if semisupervised:
                 initial_log_probability_sum = NEGINF
                 iteration, improvement = 0, INF
-                n_classes = numpy.unique(y).shape[0]
 
                 unsupervised = GeneralMixtureModel(self.distributions)
-
-                X_labeled = X[y != -1]
-                y_labeled = y[y != -1]
-                weights_labeled = None if weights is None else weights[y != -1]
-
-                X_unlabeled = X[y == -1]
-                weights_unlabeled = None if weights is None else weights[y == -1]
-
-                labeled_starts = [int(i*len(X_labeled)/n_jobs) for i in range(n_jobs)]
-                labeled_ends = [int(i*len(X_labeled)/n_jobs) for i in range(1, n_jobs+1)]
-
-                unlabeled_starts = [int(i*len(X_unlabeled)/n_jobs) for i in range(n_jobs)]
-                unlabeled_ends = [int(i*len(X_unlabeled)/n_jobs) for i in range(1, n_jobs+1)]
+                f2 = delayed(unsupervised.summarize)
 
                 while improvement > stop_threshold and iteration < max_iterations + 1:
                     epoch_start_time = time.time()
                     self.from_summaries(inertia, pseudocount)
-                    unsupervised.weights[:] = self.weights
 
-                    parallel( delayed(self.summarize,
-                        check_pickle=False)(X_labeled[start:end],
-                        y_labeled[start:end], weights_labeled[start:end])
-                        for start, end in zip(labeled_starts, labeled_ends))
+                    unsupervised.weights[:] = self.weights
+                    parallel(f(*batch) for batch in data_generator.labeled_batches())
 
                     unsupervised.summaries[:] = self.summaries
 
-                    log_probability_sum = sum(parallel( delayed(unsupervised.summarize,
-                        check_pickle=False)(X_unlabeled[start:end], weights_unlabeled[start:end])
-                        for start, end in zip(unlabeled_starts, unlabeled_ends)))
+                    log_probability_sum = sum(parallel(f2(*batch) for batch in 
+                        data_generator.unlabeled_batches()))
 
                     self.summaries[:] = unsupervised.summaries
 
@@ -666,17 +686,19 @@ cdef class BayesModel(Model):
 
                         total_improvement += improvement
 
-                        logs = {'learning_rate': None,
-                                'n_seen_batches' : None,
-                                'epoch' : iteration,
-                                'improvement' : improvement,
-                                'total_improvement' : total_improvement,
-                                'log_probability' : log_probability_sum,
-                                'last_log_probability' : last_log_probability_sum,
-                                'initial_log_probability' : initial_log_probability_sum,
-                                'epoch_start_time' : epoch_start_time,
-                                'epoch_end_time' : epoch_end_time,
-                                'duration' : time_spent }
+                        logs = {
+                            'learning_rate': None,
+                            'n_seen_batches' : None,
+                            'epoch' : iteration,
+                            'improvement' : improvement,
+                            'total_improvement' : total_improvement,
+                            'log_probability' : log_probability_sum,
+                            'last_log_probability' : last_log_probability_sum,
+                            'initial_log_probability' : initial_log_probability_sum,
+                            'epoch_start_time' : epoch_start_time,
+                            'epoch_end_time' : epoch_end_time,
+                            'duration' : time_spent
+                        }
 
                         for callback in callbacks:
                             callback.on_epoch_end(logs)
@@ -734,7 +756,7 @@ cdef class BayesModel(Model):
         if weights is None:
             weights = numpy.ones(X.shape[0], dtype='float64')
         else:
-            weights = numpy.array(weights, dtype='float64')
+            weights = numpy.asarray(weights, dtype='float64')
 
         if self.is_vl_:
             for i, distribution in enumerate(self.distributions):
@@ -779,8 +801,11 @@ cdef class BayesModel(Model):
         None
         """
 
+        if self.frozen:
+            return self
+
         if self.summaries.sum() == 0:
-            return
+            return self
 
         summaries = self.summaries + pseudocount
         summaries /= summaries.sum()

@@ -4,19 +4,18 @@
 # DiscreteDistribution.pyx
 # Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
-import numpy
-import sys
 import itertools as it
-import json
+import numpy
 import random
 
 from libc.stdlib cimport calloc
 from libc.stdlib cimport free
-from libc.string cimport memset
+from libc.stdlib cimport malloc
 
 from ..utils cimport _log
 from ..utils cimport isnan
 from ..utils import check_random_state
+from ..utils import _check_nan
 
 from libc.math cimport sqrt as csqrt
 
@@ -24,13 +23,6 @@ from libc.math cimport sqrt as csqrt
 DEF NEGINF = float("-inf")
 DEF INF = float("inf")
 eps = numpy.finfo(numpy.float64).eps
-
-if sys.version_info[0] > 2:
-	# Set up for Python 3
-	xrange = range
-	izip = zip
-else:
-	izip = it.izip
 
 cdef class DiscreteDistribution(Distribution):
 	"""
@@ -46,7 +38,7 @@ cdef class DiscreteDistribution(Distribution):
 			self.dist = d
 			self.log_dist = {key: _log(value) for key, value in d.items()}
 
-	def __cinit__(self, dict characters, bint frozen=False):
+	def __cinit__(self, dict characters = {}, bint frozen=False):
 		"""
 		Make a new discrete distribution with a dictionary of discrete
 		characters and their probabilities, checking to see that these
@@ -56,16 +48,22 @@ cdef class DiscreteDistribution(Distribution):
 
 		self.name = "DiscreteDistribution"
 		self.frozen = frozen
-		self.dtype = str(type(list(characters.keys())[0])).split()[-1].strip('>').strip("'")
+
+		self.is_blank_= True
+		self.dtype = None
+		if len(characters) > 0:
+			self.is_blank_ = False
+			self.dtype = self._get_dtype(characters)
 
 		self.dist = characters.copy()
 		self.log_dist = { key: _log(value) for key, value in characters.items() }
 		self.summaries =[{ key: 0 for key in characters.keys() }, 0]
 
-		self.encoded_summary = 0
-		self.encoded_keys = None
-		self.encoded_counts = NULL
-		self.encoded_log_probability = NULL
+	def _get_dtype(self, characters: dict) -> str:
+		"""
+		Determine dtype from characters.
+		"""
+		return str(type(list(characters.keys())[0])).split()[-1].strip('>').strip("'")
 
 	def __dealloc__(self):
 		if self.encoded_keys is not None:
@@ -81,15 +79,31 @@ cdef class DiscreteDistribution(Distribution):
 
 	def __mul__(self, other):
 		"""Multiply this by another distribution sharing the same keys."""
-		assert set(self.keys()) == set(other.keys())
+
+		self_keys = self.keys()
+		other_keys = other.keys()
 		distribution, total = {}, 0.0
 
-		for key in self.keys():
-			x, y = self.probability(key), other.probability(key)
-			distribution[key] = (x + eps) * (y + eps)
-			total += distribution[key]
+		if isinstance(other, DiscreteDistribution) and self_keys == other_keys:
+			self_values = (<DiscreteDistribution>self).dist.values()
+			other_values = (<DiscreteDistribution>other).dist.values()
+			for key, x, y in zip(self_keys, self_values, other_values):
+				if _check_nan(key):
+					distribution[key] = (1 + eps) * (1 + eps)
+				else:
+					distribution[key] = (x + eps) * (y + eps)
+				total += distribution[key]
+		else:
+			assert set(self_keys) == set(other_keys)
+			self_items = (<DiscreteDistribution>self).dist.items()
+			for key, x in self_items:
+				if _check_nan(key):
+					x = 1.
+				y = other.probability(key)
+				distribution[key] = (x + eps) * (y + eps)
+				total += distribution[key]
 
-		for key in self.keys():
+		for key in self_keys:
 			distribution[key] /= total
 
 			if distribution[key] <= eps / total:
@@ -106,14 +120,31 @@ cdef class DiscreteDistribution(Distribution):
 		if not isinstance(other, DiscreteDistribution):
 			return False
 
-		if set(self.keys()) != set(other.keys()):
-			return False
+		self_keys = self.keys()
+		other_keys = other.keys()
 
-		for key in self.keys():
-			self_prob = round(self.log_probability(key), 12)
-			other_prob = round(other.log_probability(key), 12)
-			if self_prob != other_prob:
-				return False
+		if self_keys == other_keys:
+			self_values = (<DiscreteDistribution>self).log_dist.values()
+			other_values = (<DiscreteDistribution>other).log_dist.values()
+			for key, self_prob, other_prob in zip(self_keys, self_values, other_values):
+				if _check_nan(key):
+					continue
+				self_prob = round(self_prob, 12)
+				other_prob = round(other_prob, 12)
+				if self_prob != other_prob:
+					return False
+		elif set(self_keys) == set(other_keys):
+			self_items = (<DiscreteDistribution>self).log_dist.items()
+			for key, self_prob in self_items:
+				if _check_nan(key):
+					self_prob = 0.
+				else:
+					self_prob = round(self_prob, 12)
+				other_prob = round(other.log_probability(key), 12)
+				if self_prob != other_prob:
+					return False
+		else:
+			return False
 
 		return True
 
@@ -156,13 +187,23 @@ cdef class DiscreteDistribution(Distribution):
 		free(self.encoded_log_probability)
 
 		self.encoded_counts = <double*> calloc(n, sizeof(double))
-		self.encoded_log_probability = <double*> calloc(n, sizeof(double))
+		self.encoded_log_probability = <double*> malloc(n * sizeof(double))
 		self.n = n
 
 		for i in range(n):
 			key = keys[i]
-			self.encoded_counts[i] = 0
 			self.encoded_log_probability[i] = self.log_dist.get(key, NEGINF)
+
+	def probability(self, X):
+		"""Return the prob of the X under this distribution."""
+
+		return self.__probability(X)
+
+	cdef double __probability(self, X):
+		if _check_nan(X):
+			return 1.
+		else:
+			return self.dist.get(X, 0)
 
 	def log_probability(self, X):
 		"""Return the log prob of the X under this distribution."""
@@ -170,13 +211,10 @@ cdef class DiscreteDistribution(Distribution):
 		return self.__log_probability(X)
 
 	cdef double __log_probability(self, X):
-		if isinstance(X, (str, unicode)):
-			if X == 'nan':
-				return 0.
-		elif X is None or numpy.isnan(X):
+		if _check_nan(X):
 			return 0.
-
-		return self.log_dist.get(X, NEGINF)
+		else:
+			return self.log_dist.get(X, NEGINF)
 
 	cdef void _log_probability(self, double* X, double* log_probability, int n) nogil:
 		cdef int i
@@ -199,8 +237,7 @@ cdef class DiscreteDistribution(Distribution):
 		else:
 			return random_state.choice(keys, p=probabilities, size=n)
 
-	def fit(self, items, weights=None, inertia=0.0, pseudocount=0.0,
-		column_idx=0):
+	def fit(self, items, weights=None, inertia=0.0, pseudocount=0.0):
 		"""
 		Set the parameters of this Distribution to maximize the likelihood of
 		the given sample. Items holds some sort of sequence. If weights is
@@ -208,23 +245,28 @@ cdef class DiscreteDistribution(Distribution):
 		"""
 
 		if self.frozen:
-			return
+			return self
 
-		self.summarize(items, weights, column_idx)
+		self.summarize(items, weights)
 		self.from_summaries(inertia, pseudocount)
+		return self
 
-	def summarize(self, items, weights=None, column_idx=0):
+	def summarize(self, items, weights=None):
 		"""Reduce a set of observations to sufficient statistics."""
-
 		if weights is None:
 			weights = numpy.ones(len(items))
 		else:
 			weights = numpy.asarray(weights)
-
-		self.summaries[1] += weights.sum()
-		characters = self.summaries[0]
-		for i in xrange(len(items)):
-			characters[items[i]] += weights[i]
+		items = numpy.asarray(items).flatten()
+			
+		for i in range(len(items)):
+			x = items[i]
+			if _check_nan(x) == False:
+				try:
+					self.summaries[0][x] += weights[i]
+				except KeyError:
+					self.summaries[0][x] = weights[i]
+				self.summaries[1] += weights[i]
 
 	cdef double _summarize(self, double* items, double* weights, int n,
 		int column_idx, int d) nogil:
@@ -233,7 +275,6 @@ cdef class DiscreteDistribution(Distribution):
 		self.encoded_summary = 1
 
 		encoded_counts = <double*> calloc(self.n, sizeof(double))
-		memset(encoded_counts, 0, self.n*sizeof(double))
 
 		for i in range(n):
 			item = items[i*d + column_idx]
@@ -258,10 +299,12 @@ cdef class DiscreteDistribution(Distribution):
 		if self.encoded_summary == 0:
 			values = self.summaries[0].values()
 			_sum = sum(values) + pseudocount * len(values)
-			characters = {}
 			for key, value in self.summaries[0].items():
 				value += pseudocount
-				self.dist[key] = self.dist[key]*inertia + (1-inertia)*(value / _sum)
+				try:
+					self.dist[key] = self.dist[key]*inertia + (1-inertia)*(value / _sum)
+				except KeyError:
+					self.dist[key] = value / _sum
 				self.log_dist[key] = _log(self.dist[key])
 
 			self.bake(self.encoded_keys)
@@ -274,11 +317,14 @@ cdef class DiscreteDistribution(Distribution):
 				key = self.encoded_keys[i]
 				self.dist[key] = self.dist[key]*inertia + (1-inertia)*(value / _sum)
 				self.log_dist[key] = _log(self.dist[key])
-				self.encoded_counts[i] = 0
 
 			self.bake(self.encoded_keys)
 
-		self.summaries = [{ key: 0 for key in self.keys() }, 0]
+		if self.is_blank_:
+			self.dtype = self._get_dtype(self.dist)
+			self.is_blank_ = False
+
+		self.clear_summaries()
 
 	def clear_summaries(self):
 		"""Clear the summary statistics stored in the object."""
@@ -288,63 +334,25 @@ cdef class DiscreteDistribution(Distribution):
 			for i in range(len(self.encoded_keys)):
 				self.encoded_counts[i] = 0
 
-	def to_json(self, separators=(',', ' :'), indent=4):
-		"""Serialize the distribution to a JSON.
-
-		Parameters
-		----------
-		separators : tuple, optional
-			The two separators to pass to the json.dumps function for formatting.
-			Default is (',', ' : ').
-
-		indent : int, optional
-			The indentation to use at each level. Passed to json.dumps for
-			formatting. Default is 4.
-
-		Returns
-		-------
-		json : str
-			A properly formatted JSON object.
-		"""
-
-		return json.dumps({
-								'class' : 'Distribution',
-								'dtype' : self.dtype,
-								'name'  : self.name,
-								'parameters' : [{str(key): value for key, value in self.dist.items()}],
-								'frozen' : self.frozen
-						   }, separators=separators, indent=indent)
+	def to_dict(self):
+		return {
+			'class' : 'Distribution',
+			'dtype' : self.dtype,
+			'name'  : self.name,
+			'parameters' : [{str(key): value for key, value in self.dist.items()}],
+			'frozen' : self.frozen
+		}
 
 	@classmethod
-	def from_samples(cls, items, weights=None, pseudocount=0):
+	def from_samples(cls, items, weights=None, pseudocount=0, keys=None):
 		"""Fit a distribution to some data without pre-specifying it."""
-
-		if weights is None:
-			weights = numpy.ones(len(items))
-
-		Xs = {}
-		total = 0
-
-		for X, weight in izip(items, weights):
-			if isinstance(X, str) and X == 'nan':
-				continue
-			elif isinstance(X, (int, float)) and numpy.isnan(X):
-				continue
-
-			total += weight
-			if X in Xs:
-				Xs[X] += weight
-			else:
-				Xs[X] = weight
-
-		n = len(Xs)
-
-		for X, weight in Xs.items():
-			Xs[X] = (weight + pseudocount) / (total + pseudocount * n)
-
-		d = DiscreteDistribution(Xs)
-		return d
+		key_initials = {}
+		if keys is not None:
+			clean_keys = tuple(key for key in keys if not _check_nan(key))
+			# A priori equal probability.
+			key_initials = {key: 1./len(clean_keys) for key in clean_keys}
+		return cls(key_initials).fit(items, weights=weights, pseudocount=pseudocount)
 
 	@classmethod
 	def blank(cls):
-		return DiscreteDistribution({})
+		return cls()

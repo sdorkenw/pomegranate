@@ -54,33 +54,33 @@ def global_alignment( match_distributions, insert_distribution ):
 
 def benchmark_forward( model, sample ):
 	tic = time.time()
-	for i in xrange(25000):
+	for i in range(25000):
 		logp = model.forward( sample )[-1, model.end_index]
 	print("{:16}: time: {:5.5}, logp: {:5.5}".format( "FORWARD", time.time() - tic, logp ))
 
 def benchmark_backward( model, sample ):
 	tic = time.time()
-	for i in xrange(25000):
+	for i in range(25000):
 		logp = model.backward( sample )[0, model.start_index]
 	print("{:16}: time: {:5.5}, logp: {:5.5}".format( "BACKWARD", time.time() - tic, logp ))
 
 def benchmark_forward_backward( model, sample ):
 	tic = time.time()
-	for i in xrange(25000):
+	for i in range(25000):
 		model.forward_backward( sample )
 	print("{:16}: time: {:5.5}".format( "FORWARD-BACKWARD", time.time() - tic ))
 
 def benchmark_viterbi( model, sample ):
 
 	tic = time.time()
-	for i in xrange(25000):
+	for i in range(25000):
 		logp, path = model.viterbi( sample )
 	print("{:16}: time: {:5.5}, logp: {:5.5}".format( "VITERBI", time.time() - tic, logp ))
 
 def benchmark_training( model, samples, n_jobs ):
 	tic = time.time()
-	improvement = model.train( samples, max_iterations=10, verbose=False, n_jobs=n_jobs )
-	print("{:16}: time: {:5.5}, improvement: {:5.5} ({} jobs)".format( "BW TRAINING", time.time() - tic, improvement, n_jobs ))
+	improvement = model.fit( samples, max_iterations=10, verbose=False, n_jobs=n_jobs , return_history=True)
+	print("{:16}: time: {:5.5}, improvement: {:5.5} ({} jobs)".format( "BW TRAINING", time.time() - tic, improvement[1].total_improvement[0], n_jobs ))
 
 def main():
 	n = 15

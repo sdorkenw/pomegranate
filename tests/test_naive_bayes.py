@@ -1,6 +1,9 @@
 from __future__ import (division)
 
 from pomegranate import *
+from pomegranate.io import DataGenerator
+from pomegranate.io import DataFrameGenerator
+
 from nose.tools import with_setup
 from nose.tools import assert_almost_equal
 from nose.tools import assert_equal
@@ -10,6 +13,8 @@ from nose.tools import assert_raises
 from nose.tools import assert_true
 from numpy.testing import assert_array_equal
 from numpy.testing import assert_array_almost_equal
+
+import pandas
 import random
 import pickle
 import numpy as np
@@ -713,3 +718,172 @@ def test_json():
 	assert_true(isinstance(new_univ.distributions[1], UniformDistribution))
 	assert_true(isinstance(new_univ, NaiveBayes))
 	numpy.testing.assert_array_equal( model.weights, new_univ.weights)
+
+@with_setup(setup_univariate_mixed, teardown)
+def test_robust_from_json():
+	j_univ = model.to_json()
+
+	new_univ = from_json(j_univ)
+	assert_true(isinstance(new_univ.distributions[0], NormalDistribution))
+	assert_true(isinstance(new_univ.distributions[1], UniformDistribution))
+	assert_true(isinstance(new_univ, NaiveBayes))
+	numpy.testing.assert_array_equal( model.weights, new_univ.weights)
+
+@with_setup(setup_multivariate_gaussian, teardown)
+def test_io_log_probability():
+	X2 = DataGenerator(X)
+	X3 = DataFrameGenerator(pandas.DataFrame(X))
+	logp1 = model.log_probability(X)
+	logp2 = model.log_probability(X2)
+	logp3 = model.log_probability(X3)
+	assert_array_almost_equal(logp1, logp2)
+	assert_array_almost_equal(logp1, logp3)
+
+@with_setup(setup_multivariate_gaussian, teardown)
+def test_io_predict():
+	X2 = DataGenerator(X)
+	X3 = DataFrameGenerator(pandas.DataFrame(X))
+	y_hat1 = model.predict(X)
+	y_hat2 = model.predict(X2)
+	y_hat3 = model.predict(X3)
+	assert_array_almost_equal(y_hat1, y_hat2)
+	assert_array_almost_equal(y_hat1, y_hat3)
+
+@with_setup(setup_multivariate_gaussian, teardown)
+def test_io_predict_proba():
+	X2 = DataGenerator(X)
+	X3 = DataFrameGenerator(pandas.DataFrame(X))
+	y_hat1 = model.predict_proba(X)
+	y_hat2 = model.predict_proba(X2)
+	y_hat3 = model.predict_proba(X3)
+	assert_array_almost_equal(y_hat1, y_hat2)
+	assert_array_almost_equal(y_hat1, y_hat3)
+
+@with_setup(setup_multivariate_gaussian, teardown)
+def test_io_predict_log_proba():
+	X2 = DataGenerator(X)
+	X3 = DataFrameGenerator(pandas.DataFrame(X))
+	y_hat1 = model.predict_log_proba(X)
+	y_hat2 = model.predict_log_proba(X2)
+	y_hat3 = model.predict_log_proba(X3)
+	assert_array_almost_equal(y_hat1, y_hat2)
+	assert_array_almost_equal(y_hat1, y_hat3)
+
+def test_io_fit():
+	X = numpy.random.randn(100, 5) + 0.5
+	weights = numpy.abs(numpy.random.randn(100))
+	y = numpy.random.randint(2, size=100)
+	data_generator = DataGenerator(X, weights, y)
+
+	d1 = IndependentComponentsDistribution([
+		NormalDistribution(0, 1) for i in range(5)])
+	d2 = IndependentComponentsDistribution([
+		NormalDistribution(1, 1) for i in range(5)])
+
+	nb1 = NaiveBayes([d1, d2])
+	nb1.fit(X, y, weights)
+
+	d1 = IndependentComponentsDistribution([
+		NormalDistribution(0, 1) for i in range(5)])
+	d2 = IndependentComponentsDistribution([
+		NormalDistribution(1, 1) for i in range(5)])
+
+	nb2 = NaiveBayes([d1, d2])
+	nb2.fit(data_generator)
+
+	logp1 = nb1.log_probability(X)
+	logp2 = nb2.log_probability(X)
+
+	assert_array_almost_equal(logp1, logp2)
+
+def test_io_from_samples():
+	X = numpy.random.randn(100, 5) + 0.5
+	weights = numpy.abs(numpy.random.randn(100))
+	y = numpy.random.randint(2, size=100)
+	data_generator = DataGenerator(X, weights, y)
+
+	d = NormalDistribution
+
+	nb1 = NaiveBayes.from_samples(d, X=X, weights=weights, y=y)
+	nb2 = NaiveBayes.from_samples(d, X=data_generator)
+
+	logp1 = nb1.log_probability(X)
+	logp2 = nb2.log_probability(X)
+
+	assert_array_almost_equal(logp1, logp2)
+
+def test_discrete_distribution():
+	"""
+	Test fit NaiveBayes to discrete variables.
+	"""
+	X = np.array([
+	[0, 0],
+	[1, 1],
+	[2, 0],
+	[0, 0],
+	[1, 1],
+	[2, 0],
+	])
+	y = np.array([0, 0, 0, 1, 1, 1])
+	m = NaiveBayes.from_samples(
+		DiscreteDistribution,
+		X,
+		y,
+	)
+	p_y0 = m.distributions[0].parameters[0]
+	assert_almost_equal(list(p_y0[0].parameters[0].values()), [1/3, 1/3, 1/3])
+	assert_almost_equal(list(p_y0[1].parameters[0].values()), [2/3, 1/3])
+
+	p_y1 = m.distributions[1].parameters[0]
+	assert_almost_equal(list(p_y1[0].parameters[0].values()), [1/3, 1/3, 1/3])
+	assert_almost_equal(list(p_y1[1].parameters[0].values()), [2/3, 1/3])
+
+	# Check the probability calculation for a test variable.
+	X_test = np.array([[1, 0]])
+	p_groundtruth = np.array([[1/2, 1/2]])
+	assert_array_almost_equal(m.predict_log_proba(X_test), np.log(p_groundtruth))
+	assert_array_almost_equal(m.log_probability(X_test), [np.log(2/9)])
+	assert_array_almost_equal(m.predict_proba(X_test), p_groundtruth)
+	assert_array_almost_equal(m.predict(X_test), [0])
+
+def test_bernoulli_discrete_distribution():
+	"""
+	Test model composed of a Bernoulli and discrete distribution.
+	"""
+	X = np.array([
+		# y = 0.
+		[0, 1],
+		[0, 1],
+		[1, 0],
+		[1, 0],
+		[1, 0],
+		# y = 1.
+		[0, 0],
+		[1, 0],
+		[1, 1],
+		[1, 1],
+	])
+	y = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1])
+
+	# Since the data is composed of binary values, `DiscreteDistribution` and
+	# `BernoulliDistribution` should coincide.
+	m1 = NaiveBayes.from_samples(DiscreteDistribution, X, y)
+	m2 = NaiveBayes.from_samples(BernoulliDistribution, X, y)
+	m3 = NaiveBayes.from_samples([DiscreteDistribution, BernoulliDistribution], X, y)
+	m4 = NaiveBayes.from_samples([BernoulliDistribution, DiscreteDistribution], X, y)
+
+	# Work out expression analytically for a single test point.
+	X_test = np.array([[0, 1]])
+	py0_x01 = (2/5) * (2/5) * (5/9)
+	py1_x01 = (1/4) * (1/2) * (4/9)
+	py0_cond_x01 = py0_x01 / (py0_x01 + py1_x01)
+	p_groundtruth = np.array([[py0_cond_x01, 1- py0_cond_x01]])
+	assert_array_almost_equal(m1.predict_proba(X_test), p_groundtruth)
+	assert_array_almost_equal(m1.predict_log_proba(X_test), np.log(p_groundtruth))
+	assert_array_almost_equal(m1.log_probability(X_test), [np.log(py0_x01 + py1_x01)])
+	assert_array_almost_equal(m1.predict(X_test), [0])
+
+	# Check that all predictions are identical.
+	assert_array_almost_equal(m1.predict_proba(X), m2.predict_proba(X))
+	assert_array_almost_equal(m2.predict_proba(X), m3.predict_proba(X))
+	assert_array_almost_equal(m3.predict_proba(X), m4.predict_proba(X))

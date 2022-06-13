@@ -3,8 +3,6 @@
 # BayesClassifier.pyx
 # Contact: Jacob Schreiber ( jmschreiber91@gmail.com )
 
-import time
-import json
 import numpy
 cimport numpy
 
@@ -14,10 +12,8 @@ from .gmm import GeneralMixtureModel
 from .hmm import HiddenMarkovModel
 from .BayesianNetwork import BayesianNetwork
 
-from .utils import _convert
-
-from joblib import Parallel
-from joblib import delayed
+from .io import BaseGenerator
+from .io import DataGenerator
 
 DEF NEGINF = float("-inf")
 DEF INF = float("inf")
@@ -71,52 +67,41 @@ cdef class BayesClassifier(BayesModel):
 	"""
 
 	def __init__(self, distributions, weights=None):
-		super(BayesClassifier, self).__init__(distributions, weights)
+		super(self.__class__, self).__init__(distributions, weights)
 
 	def __reduce__(self):
 		return self.__class__, (self.distributions, self.weights)
 
-	def to_json( self, separators=(',', ' : '), indent=4 ):
+	def to_dict(self):
 		if self.d == 0:
 			raise ValueError("must fit components to the data before prediction")
 
-		model = {
+		return {
 			'class' : 'BayesClassifier',
-			'models' : [ json.loads( model.to_json() ) for model in self.distributions ],
+			'models' : [ model.to_dict() for model in self.distributions ],
 			'weights' : self.weights.tolist()
 		}
 
-		return json.dumps(model, separators=separators, indent=indent)
-
 	@classmethod
-	def from_json( cls, s ):
-		try:
-			d = json.loads( s )
-		except:
-			try:
-				with open( s, 'r' ) as f:
-					d = json.load( f )
-			except:
-				raise IOError("String must be properly formatted JSON or filename of properly formatted JSON.")
-
+	def from_dict(cls, d):
 		models = list()
 		for j in d['models']:
 			if j['class'] == 'Distribution':
-				models.append( Distribution.from_json( json.dumps(j) ) )
+				models.append(Distribution.from_dict(j))
 			elif j['class'] == 'GeneralMixtureModel':
-				models.append( GeneralMixtureModel.from_json( json.dumps(j) ) )
+				models.append(GeneralMixtureModel.from_dict(j))
 			elif j['class'] == 'HiddenMarkovModel':
-				models.append( HiddenMarkovModel.from_json( json.dumps(j) ) )
+				models.append(HiddenMarkovModel.from_dict(j))
 			elif j['class'] == 'BayesianNetwork':
-				models.append( BayesianNetwork.from_json( json.dumps(j) ) )
+				models.append(BayesianNetwork.from_dict(j))
 
-		nb = BayesClassifier( models, numpy.array( d['weights'] ) )
+		nb = cls( models, numpy.array(d['weights']))
 		return nb
 
 	@classmethod
-	def from_samples(self, distributions, X, y, weights=None,
+	def from_samples(cls, distributions, X, y=None, weights=None,
 		inertia=0.0, pseudocount=0.0, stop_threshold=0.1, max_iterations=1e8,
-		callbacks=[], return_history=False, verbose=False, n_jobs=1):
+		callbacks=[], return_history=False, keys=None, verbose=False, n_jobs=1, **kwargs):
 		"""Create a Bayes classifier directly from the given dataset.
 
 		This will initialize the distributions using maximum likelihood estimates
@@ -183,15 +168,24 @@ cdef class BayesClassifier(BayesModel):
         return_history : bool, optional
             Whether to return the history during training as well as the model.
 
+        keys : list
+            A list of sets where each set is the keys present in that column.
+            If there are d columns in the data set then this list should have
+            d sets and each set should have at least two keys in it.
+
 		verbose : bool, optional
 			Whether or not to print out improvement information over
 			iterations. Only required if doing semisupervised learning.
 			Default is False.
 
-		n_jobs : int
+		n_jobs : int, optional
 			The number of jobs to use to parallelize, either the number of threads
 			or the number of processes to use. -1 means use all available resources.
 			Default is 1.
+
+		**kwargs : dict, optional
+			Any arguments to pass into the `from_samples` methods of other objects
+			that are being created such as BayesianNetworks or HMMs.
 
 		Returns
 		-------
@@ -202,25 +196,45 @@ cdef class BayesClassifier(BayesModel):
 		if isinstance(distributions, (list, numpy.ndarray, tuple)):
 			for distribution in distributions:
 				if not callable(distribution):
-					raise ValueError("must pass in class constructors, not initiated distributions (i.e. NormalDistribution)")
+					raise ValueError("must pass in class constructors, not initiated distributions (e.g. NormalDistribution)")
 
-		X = numpy.array(X)
-		y = numpy.array(y)
+		if not isinstance(X, BaseGenerator):
+			if y is None:
+				raise ValueError("Must pass in both X and y as arrays or a data generator for X.")
 
-		n, d = X.shape
-		n_components = numpy.unique(y[y != -1]).shape[0]
+			batch_size = len(X) // n_jobs + len(X) % n_jobs
+			data_generator = DataGenerator(X, weights, y, batch_size=batch_size)
+		else:
+			data_generator = X
+
+		n, d = data_generator.shape
+		n_components = len(data_generator.classes) - (-1 in data_generator.classes)
+
 		if callable(distributions):
-			if d > 1:
+			if distributions in (BayesianNetwork, HiddenMarkovModel):
+				batches = [batch for batch in data_generator.batches()]
+				X = numpy.concatenate([batch[0] for batch in batches])
+				y = numpy.concatenate([batch[1] for batch in batches])
+				weights = numpy.concatenate([batch[2] for batch in batches])
+				labels = numpy.unique(y)
+
+				distributions = [distributions.from_samples(X[y == label], 
+					weights=weights, keys=keys, pseudocount=pseudocount) for label in labels]
+
+				return cls(distributions)
+
+			elif d > 1:
 				distributions = [distributions.blank(d) for i in range(n_components)]
 			else:
 				distributions = [distribution.blank() for i in range(n_components)]
 		else:
 			distributions = [distribution.blank() for distribution in distributions]
 
-		model = BayesClassifier(distributions)
-		_, history = model.fit(X, y, weights=weights, inertia=inertia, pseudocount=pseudocount,
-			stop_threshold=stop_threshold, max_iterations=max_iterations,
-			callbacks=callbacks, return_history=True, verbose=verbose, n_jobs=n_jobs)
+		model = cls(distributions)
+		_, history = model.fit(X=data_generator, weights=weights, inertia=inertia, 
+			pseudocount=pseudocount, stop_threshold=stop_threshold, 
+			max_iterations=max_iterations, callbacks=callbacks, 
+			return_history=True, verbose=verbose, n_jobs=n_jobs)
 
 		if return_history:
 			return model, history

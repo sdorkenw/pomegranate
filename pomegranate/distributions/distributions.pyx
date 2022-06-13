@@ -5,7 +5,6 @@
 # Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
 
-import json
 import numpy
 import sys
 
@@ -133,7 +132,7 @@ cdef class Distribution(Model):
 		logp_array = numpy.empty(n, dtype='float64')
 		logp_ptr = <double*> logp_array.data
 
-		X_ndarray = numpy.array(X, dtype='float64')
+		X_ndarray = numpy.asarray(X, dtype='float64')
 		X_ptr = <double*> X_ndarray.data
 
 		self._log_probability(X_ptr, logp_ptr, n)
@@ -239,69 +238,44 @@ cdef class Distribution(Model):
 		import matplotlib.pyplot as plt
 		plt.hist(self.sample(n), **kwargs)
 
-	def to_json(self, separators=(',', ' :'), indent=4):
-		"""Serialize the distribution to a JSON.
-
-		Parameters
-		----------
-		separators : tuple, optional
-			The two separators to pass to the json.dumps function for formatting.
-			Default is (',', ' : ').
-
-		indent : int, optional
-			The indentation to use at each level. Passed to json.dumps for
-			formatting. Default is 4.
-
-		Returns
-		-------
-		json : str
-			A properly formatted JSON object.
-		"""
-
-		return json.dumps({
-								'class' : 'Distribution',
-								'name'  : self.name,
-								'parameters' : self.parameters,
-								'frozen' : self.frozen
-						   }, separators=separators, indent=indent)
+	def to_dict(self):
+		return {
+			'class' : 'Distribution',
+			'name'  : self.name,
+			'parameters' : self.parameters,
+			'frozen' : self.frozen
+		}
 
 	@classmethod
-	def from_json(cls, s):
-		"""Read in a serialized distribution and return the appropriate object.
-
-		Parameters
-		----------
-		s : str
-			A JSON formatted string containing the file.
-
-		Returns
-		-------
-		model : object
-			A properly initialized and baked model.
-		"""
-
-		d = json.loads(s)
-
+	def from_dict(cls, d):
 		if ' ' in d['class'] or 'Distribution' not in d['class']:
 			raise SyntaxError("Distribution object attempting to read invalid object.")
 
 		if d['name'] == 'IndependentComponentsDistribution':
-			d['parameters'][0] = [cls.from_json(json.dumps(dist)) for dist in d['parameters'][0]]
+			d['parameters'][0] = [cls.from_dict(dist) for dist in d['parameters'][0]]
 			return IndependentComponentsDistribution(d['parameters'][0], d['parameters'][1], d['frozen'])
+
 		elif d['name'] == 'DiscreteDistribution':
+			dp = d['parameters'][0]
+
 			if d['dtype'] in ('str', 'unicode', 'numpy.string_'):
-				dist = {str(key) : value for key, value in d['parameters'][0].items()}
+				dist = {str(key) : value for key, value in dp.items()}
+			elif d['dtype'] == 'bool':
+				dist = {key == 'True' : value for key, value in dp.items()}
 			elif d['dtype'] == 'int':
-				dist = {int(key) : value for key, value in d['parameters'][0].items()}
+				dist = {int(key) : value for key, value in dp.items()}
 			elif d['dtype'] == 'float':
-				dist = {float(key) : value for key, value in d['parameters'][0].items()}
+				dist = {float(key) : value for key, value in dp.items()}
+			elif d['dtype'].startswith('numpy.'):
+				dtype = d['dtype'][6:]
+				dist = {numpy.array([key], dtype=dtype)[0]: value for key, value in dp.items()}
 			else:
-				dist = d['parameters'][0]
+				dist = dp
 
 			return DiscreteDistribution(dist, frozen=d['frozen'])
 
 		elif 'Table' in d['name']:
-			parents = [Distribution.from_json(json.dumps(j)) for j in d['parents']]
+			parents = [j if isinstance(j, int) else Distribution.from_dict(j) for j in d['parents']]
 			table = []
 
 			for row in d['table']:
@@ -309,10 +283,15 @@ cdef class Distribution(Model):
 				for dtype, item in zip(d['dtypes'], row):
 					if dtype in ('str', 'unicode', 'numpy.string_'):
 						table[-1].append(str(item))
+					elif dtype == 'bool':
+						table[-1].append(item == 'True')
 					elif dtype == 'int':
 						table[-1].append(int(item))
 					elif dtype == 'float':
 						table[-1].append(float(item))
+					elif dtype.startswith('numpy.'):
+						dtype = dtype[6:]
+						table[-1].append(numpy.array([item], dtype=dtype)[0])
 					else:
 						table[-1].append(item)
 
@@ -375,14 +354,11 @@ cdef class MultivariateDistribution(Distribution):
 		else:
 			n = len(X)
 
-		X_ndarray = numpy.array(X, dtype='float64')
+		X_ndarray = numpy.asarray(X, dtype='float64')
 		X_ptr = <double*> X_ndarray.data
 
 		logp_array = numpy.empty(n, dtype='float64')
 		logp_ptr = <double*> logp_array.data
-
-		X_ndarray = numpy.array(X, dtype='float64')
-		X_ptr = <double*> X_ndarray.data
 
 		with nogil:
 			self._log_probability(X_ptr, logp_ptr, n)

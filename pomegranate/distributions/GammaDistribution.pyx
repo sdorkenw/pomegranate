@@ -95,7 +95,7 @@ cdef class GammaDistribution(Distribution):
 			return
 
 		# Make it be a numpy array
-		items = numpy.asarray(items)
+		items = numpy.array(items).reshape(len(items))
 
 		if weights is None:
 			# Weight everything 1 if no weights specified
@@ -196,7 +196,7 @@ cdef class GammaDistribution(Distribution):
 				scipy.special.polygamma(0, shape) -
 				statistic) / (1.0 / shape - scipy.special.polygamma(1, shape))
 
-			#print new_shape, scipy.special.polygamma(1, shape)
+			#print(new_shape, scipy.special.polygamma(1, shape))
 
 			# Don't let shape escape from valid values
 			if abs(new_shape) == float("inf") or new_shape == 0:
@@ -234,4 +234,4 @@ cdef class GammaDistribution(Distribution):
 
 	@classmethod
 	def blank(cls):
-		return GammaDistribution(0, 0)
+		return cls(0, 0)

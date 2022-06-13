@@ -6,21 +6,17 @@
 
 from libc.stdlib cimport calloc
 from libc.stdlib cimport free
+from libc.stdlib cimport malloc
 from libc.string cimport memset
 from libc.math cimport exp as cexp
-
 from ..utils cimport _log
 from ..utils cimport isnan
+#from ..utils cimport  choose_one
 from ..utils import _check_nan
 from ..utils import check_random_state
 
 import itertools as it
-import json
 import numpy
-import random
-import scipy
-
-from collections import OrderedDict
 
 from .JointProbabilityTable import JointProbabilityTable
 
@@ -31,57 +27,52 @@ cdef class ConditionalProbabilityTable(MultivariateDistribution):
 	encode for.
 	"""
 
-	def __init__(self, table, parents, frozen=False):
+	def __init__(self, table, parents=None, frozen=False):
 		"""
 		Take in the distribution represented as a list of lists, where each
 		inner list represents a row.
 		"""
 
 		self.name = "ConditionalProbabilityTable"
-		self.frozen = False
-		self.m = len(parents)
+		self.m = len(parents) if parents is not None else len(table[0])-2
 		self.n = len(table)
 		self.k = len(set(row[-2] for row in table))
-		self.idxs = <int*> calloc(self.m+1, sizeof(int))
-		self.marginal_idxs = <int*> calloc(self.m, sizeof(int))
+		self.idxs = <int*> malloc((self.m+1)*sizeof(int))
+		self.marginal_idxs = <int*> malloc(self.m*sizeof(int))
 
-		self.values = <double*> calloc(self.n, sizeof(double))
+		self.values = <double*> malloc(self.n*sizeof(double))
 		self.counts = <double*> calloc(self.n, sizeof(double))
 		self.marginal_counts = <double*> calloc(self.n / self.k, sizeof(double))
 
-		self.column_idxs = numpy.arange(len(parents)+1, dtype='int32')
+		self.column_idxs = numpy.arange(self.m+1, dtype='int32')
 		self.column_idxs_ptr = <int*> self.column_idxs.data
-		self.n_columns = len(parents) + 1
+		self.n_columns = self.m + 1
 
 		self.dtypes = []
 		for column in table[0]:
 			dtype = str(type(column)).split()[-1].strip('>').strip("'")
 			self.dtypes.append(dtype)
 
-		memset(self.counts, 0, self.n*sizeof(double))
-		memset(self.marginal_counts, 0, self.n*sizeof(double)/self.k)
-
 		self.idxs[0] = 1
 		self.idxs[1] = self.k
 		for i in range(self.m-1):
-			self.idxs[i+2] = self.idxs[i+1] * len(parents[self.m-i-1])
+			k = len(numpy.unique([row[self.m-i-1] for row in table]))
+			self.idxs[i+2] = self.idxs[i+1] * k
 
 		self.marginal_idxs[0] = 1
 		for i in range(self.m-1):
-			self.marginal_idxs[i+1] = self.marginal_idxs[i] * len(parents[self.m-i-1])
+			k = len(numpy.unique([row[self.m-i-1] for row in table]))
+			self.marginal_idxs[i+1] = self.marginal_idxs[i] * k
 
-		keys = []
+		self.keymap = {}
 		for i, row in enumerate(table):
-			keys.append((tuple(row[:-1]), i))
+			self.keymap[tuple(row[:-1])] = i
 			self.values[i] = _log(row[-1])
 
-		self.keymap = OrderedDict(keys)
-
-		marginal_keys = []
+		self.marginal_keymap = {}
 		for i, row in enumerate(table[::self.k]):
-			marginal_keys.append((tuple(row[:-2]), i))
+			self.marginal_keymap[tuple(row[:-2])] = i
 
-		self.marginal_keymap = OrderedDict(marginal_keys)
 		self.parents = parents
 		self.parameters = [table, self.parents]
 
@@ -115,22 +106,20 @@ cdef class ConditionalProbabilityTable(MultivariateDistribution):
 	def bake(self, keys):
 		"""Order the inputs according to some external global ordering."""
 
-		keymap, marginal_keymap, values = [], set([]), []
+		keymap, values = [], []
 		for i, key in enumerate(keys):
 			keymap.append((key, i))
 			idx = self.keymap[key]
 			values.append(self.values[idx])
 
-		marginal_keys = []
+		self.marginal_keymap = {}
 		for i, row in enumerate(keys[::self.k]):
-			marginal_keys.append((tuple(row[:-1]), i))
-
-		self.marginal_keymap = OrderedDict(marginal_keys)
+			self.marginal_keymap[tuple(row[:-1])] = i
 
 		for i in range(len(keys)):
 			self.values[i] = values[i]
 
-		self.keymap = OrderedDict(keymap)
+		self.keymap = dict(keymap)
 
 	def sample(self, parent_values=None, n=None, random_state=None):
 		"""Return a random sample from the conditional probability table."""
@@ -138,6 +127,8 @@ cdef class ConditionalProbabilityTable(MultivariateDistribution):
 
 		if parent_values is None:
 			parent_values = {}
+
+
 
 		for parent in self.parents:
 			if parent not in parent_values:
@@ -155,10 +146,20 @@ cdef class ConditionalProbabilityTable(MultivariateDistribution):
 				sample_vals.append(cexp(self.values[ind]))
 
 		sample_vals /= numpy.sum(sample_vals)
-		sample_ind = numpy.where(random_state.multinomial(1, sample_vals))[0][0]
+
 
 		if n is None:
+			sample_ind = numpy.where(random_state.multinomial(1, sample_vals))[0][0]
 			return sample_cands[sample_ind]
+
+		# Random choice if much faster larger value of n
+		#elif n == 1:
+		#	return sample_cands[choose_one(sample_vals,len(sample_cands)-1)]
+
+
+		elif n > 5:
+			return random_state.choice(a=sample_cands,p=sample_vals,size=n)
+
 		else:
 			states = random_state.randint(1000000, size=n)
 			return [self.sample(parent_values, n=None, random_state=state)
@@ -170,31 +171,36 @@ cdef class ConditionalProbabilityTable(MultivariateDistribution):
 		ordering, like the training data.
 		"""
 
-		X = tuple(X)
+		X = numpy.array(X, ndmin=2, dtype=object)
 
-		for x in X:
-			if isinstance(x, str):
-				if x == 'nan':
-					return 0.0
-			elif x is None or numpy.isnan(x):
-				return 0.0
+		log_probabilities = numpy.zeros(X.shape[0])
+		for i, x in enumerate(X):
+			x = tuple(x)
 
-		idx = self.keymap[X]
-		return self.values[idx]
+			for x_ in x:
+				if _check_nan(x_):
+					break
+			else:
+				idx = self.keymap[x]
+				log_probabilities[i] = self.values[idx] 
+
+		if X.shape[0] == 1:
+			return log_probabilities[0]
+		return log_probabilities
+
 
 	cdef void _log_probability(self, double* X, double* log_probability, int n) nogil:
-		cdef int i, j, idx, is_na = 0
+		cdef int i, j, idx
 
 		for i in range(n):
-			idx, is_na = 0, 0
+			idx = 0
+
 			for j in range(self.m+1):
 				if isnan(X[self.m-j]):
-					is_na = 1
+					log_probability[i] = 0.
+					break
 
 				idx += self.idxs[j] * <int> X[self.m-j]
-
-			if is_na == 1:
-				log_probability[i] = 0.
 			else:
 				log_probability[i] = self.values[idx]
 
@@ -262,56 +268,45 @@ cdef class ConditionalProbabilityTable(MultivariateDistribution):
 		self.__summarize(items, weights)
 
 	cdef void __summarize(self, items, double [:] weights):
-		cdef int i, n = len(items), is_na
+		cdef int i, n = len(items)
 		cdef tuple item
 
 		for i in range(n):
-			is_na = 0
 			item = tuple(items[i])
 
 			for symbol in item:
 				if _check_nan(symbol):
-					is_na = 1
+					break
+			else:
+				key = self.keymap[item]
+				self.counts[key] += weights[i]
 
-			if is_na:
-				continue
-
-			key = self.keymap[item]
-			self.counts[key] += weights[i]
-
-			key = self.marginal_keymap[item[:-1]]
-			self.marginal_counts[key] += weights[i]
+				key = self.marginal_keymap[item[:-1]]
+				self.marginal_counts[key] += weights[i]
 
 	cdef double _summarize(self, double* items, double* weights, int n,
 		int column_idx, int d) nogil:
-		cdef int i, j, idx, k, is_na
+		cdef int i, j, idx, k
 		cdef double* counts = <double*> calloc(self.n, sizeof(double))
 		cdef double* marginal_counts = <double*> calloc(self.n / self.k, sizeof(double))
 
-		memset(counts, 0, self.n*sizeof(double))
-		memset(marginal_counts, 0, self.n / self.k * sizeof(double))
-
 		for i in range(n):
-			idx, is_na = 0, 0
+			idx = 0
 			for j in range(self.m+1):
 				k = i*self.n_columns + self.column_idxs_ptr[self.m-j]
 				if isnan(items[k]):
-					is_na = 1
-					continue
+					break
 
 				idx += self.idxs[j] * <int> items[k]
+			else:
+				counts[idx] += weights[i]
 
-			if is_na:
-				continue
+				idx = 0
+				for j in range(self.m):
+					k = i*self.n_columns + self.column_idxs_ptr[self.m-1-j]
+					idx += self.marginal_idxs[j] * <int> items[k]
 
-			counts[idx] += weights[i]
-
-			idx = 0
-			for j in range(self.m):
-				k = i*self.n_columns + self.column_idxs_ptr[self.m-1-j]
-				idx += self.marginal_idxs[j] * <int> items[k]
-
-			marginal_counts[idx] += weights[i]
+				marginal_counts[idx] += weights[i]
 
 		with gil:
 			for i in range(self.n / self.k):
@@ -359,46 +354,26 @@ cdef class ConditionalProbabilityTable(MultivariateDistribution):
 			memset(self.counts, 0, self.n*sizeof(double))
 			memset(self.marginal_counts, 0, self.n*sizeof(double)/self.k)
 
-	def to_json(self, separators=(',', ' : '), indent=4):
-		"""Serialize the model to a JSON.
-
-		Parameters
-		----------
-		separators : tuple, optional
-		    The two separators to pass to the json.dumps function for formatting.
-		    Default is (',', ' : ').
-
-		indent : int, optional
-		    The indentation to use at each level. Passed to json.dumps for
-		    formatting. Default is 4.
-
-		Returns
-		-------
-		json : str
-		    A properly formatted JSON object.
-		"""
-
+	def to_dict(self):
 		table = [list(key + tuple([cexp(self.values[i])])) for key, i in self.keymap.items()]
 		table = [[str(item) for item in row] for row in table]
 
-		model = {
-					'class' : 'Distribution',
-		            'name' : 'ConditionalProbabilityTable',
-		            'table' : table,
-		            'dtypes' : self.dtypes,
-		            'parents' : [json.loads(dist.to_json()) for dist in self.parents]
-		        }
-
-		return json.dumps(model, separators=separators, indent=indent)
+		return {
+			'class' : 'Distribution',
+			'name' : 'ConditionalProbabilityTable',
+			'table' : table,
+			'dtypes' : self.dtypes,
+			'parents' : [dist.to_dict() for dist in self.parents]
+		}
 
 	@classmethod
-	def from_samples(cls, X, parents, weights=None, pseudocount=0.0):
+	def from_samples(cls, X, parents=None, weights=None, pseudocount=0.0, keys=None):
 		"""Learn the table from data."""
 
-		X = numpy.array(X)
+		X = numpy.asarray(X)
 		n, d = X.shape
 
-		keys = [numpy.unique(X[:,i]) for i in range(d)]
+		keys = keys or [numpy.unique(X[:,i]) for i in range(d)]
 
 		for i in range(d):
 			keys_ = []

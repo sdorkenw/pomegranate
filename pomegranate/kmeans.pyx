@@ -5,32 +5,24 @@
 
 from libc.stdlib cimport calloc
 from libc.stdlib cimport free
+from libc.stdlib cimport malloc
 from libc.string cimport memset
-from libc.string cimport memcpy
 from libc.math cimport log10 as clog10
-from libc.math cimport sqrt as csqrt
 
 from scipy.linalg.cython_blas cimport ddot
 
 from .base cimport Model
 
-from .utils cimport ndarray_wrap_cpointer
 from .utils cimport mdot
-from .utils cimport _is_gpu_enabled
 from .utils cimport isnan
+from .utils import check_random_state
 
 import time
-import json
 import numpy
 cimport numpy
 
 from joblib import Parallel
 from joblib import delayed
-
-try:
-	import cupy
-except:
-	cupy = object
 
 DEF NEGINF = float("-inf")
 DEF INF = float("inf")
@@ -45,8 +37,8 @@ cdef double distance(double* X, double* centroid, int d) nogil:
 
 	return distance
 
-cpdef numpy.ndarray initialize_centroids(numpy.ndarray X, weights, int k,
-	init='first-k', double oversampling_factor=0.95):
+cpdef numpy.ndarray _initialize_centroids(numpy.ndarray X, weights, int k,
+	init='first-k', double oversampling_factor=0.95, random_state=None):
 	"""Initialize the centroids for kmeans given a dataset.
 
 	This function will take in a dataset and return the centroids found using
@@ -63,13 +55,20 @@ cpdef numpy.ndarray initialize_centroids(numpy.ndarray X, weights, int k,
 	k : int
 		The number of centroids to extract.
 
-	init : str, one of 'first-k', 'random', 'kmeans++'
+	init : str, one of 'first-k', 'random', 'kmeans++', 'kmeans||'
 		'first-k' : use the first k samples as the centroids
 		'random' : randomly select k samples as the centroids
 		'kmeans++' : use the kmeans++ initialization algorithm, which
 			iteratively selects the next centroid randomly, but weighted
 			based on distance to nearest centroid, to be likely to choose
 			good initializations
+		'kmeans||' : use the scalable kmeans++ initialization algorithm,
+			as described in http://theory.stanford.edu/~sergei/papers/vldb12-kmpar.pdf
+
+    random_state : int, numpy.random.RandomState, or None
+        The random state used for generating samples. If set to none, a
+        random seed will be used. If set to either an integer or a
+        random seed, will produce deterministic outputs.
 
 	Returns
 	-------
@@ -92,6 +91,8 @@ cpdef numpy.ndarray initialize_centroids(numpy.ndarray X, weights, int k,
 	cdef double* centroids_ptr
 	cdef double phi
 
+	random_state = check_random_state(random_state)
+
 	if weights is None:
 		weights = numpy.ones(len(X), dtype='float64') / len(X)
 	else:
@@ -106,18 +107,18 @@ cpdef numpy.ndarray initialize_centroids(numpy.ndarray X, weights, int k,
 		centroids = X[:k].copy()
 
 	elif init == 'random':
-		idxs = numpy.random.choice(n, size=k, replace=False, p=weights)
+		idxs = random_state.choice(n, size=k, replace=False, p=weights)
 		centroids = X[idxs].copy()
 
 	elif init == 'kmeans++':
 		centroids = numpy.zeros((k, d), dtype='float64')
 		centroids_ptr = <double*> centroids.data
 
-		idx = numpy.random.choice(n, p=weights)
+		idx = random_state.choice(n, p=weights)
 		centroids[0] = X[idx]
 		centroids[0][numpy.isnan(centroids[0])] = 0.0
 
-		min_distance = numpy.zeros(n, dtype='float64') + INF
+		min_distance = numpy.full(n, INF, dtype='float64')
 		min_distance_ptr = <double*> min_distance.data
 
 		for m in range(k-1):
@@ -128,13 +129,13 @@ cpdef numpy.ndarray initialize_centroids(numpy.ndarray X, weights, int k,
 				if dist < min_distance_ptr[i]:
 					min_distance_ptr[i] = dist
 
-			idx = numpy.random.choice(n, p=min_distance / min_distance.sum())
+			idx = random_state.choice(n, p=min_distance / min_distance.sum())
 			centroids[m+1] = X[idx]
 			centroids[m+1][numpy.isnan(centroids[m+1])] = 0.0
 
 	elif init == 'kmeans||':
 		centroids = numpy.zeros((1, d))
-		idx = numpy.random.choice(n, p=weights)
+		idx = random_state.choice(n, p=weights)
 		centroids[0] = X[idx]
 		centroids[0][numpy.isnan(centroids[0])] = 0
 		centroids_ptr = <double*> centroids.data
@@ -152,7 +153,7 @@ cpdef numpy.ndarray initialize_centroids(numpy.ndarray X, weights, int k,
 		count = 1
 
 		for iteration in range(int(clog10(phi))):
-			prob = numpy.random.uniform(0, 1, size=(n,))
+			prob = random_state.uniform(0, 1, size=(n,))
 			thresh = oversampling_factor * min_distance / phi
 
 			centroids = numpy.concatenate((centroids, X[prob < thresh]))
@@ -228,12 +229,14 @@ cdef class Kmeans(Model):
 
 	def __init__(self, k, init='kmeans++', n_init=10):
 		self.k = k
-		self.d = 0
-		self.n_init = n_init
+		if init != 'first-k':
+			self.n_init = n_init
+		else:
+			self.n_init = 1
 		self.centroid_norms = <double*> calloc(self.k, sizeof(double))
 
 		if isinstance(init, (list, numpy.ndarray)):
-			self.centroids = numpy.array(init, dtype='float64', ndmin=2)
+			self.centroids = numpy.array(init, dtype='float64', ndmin=2, order='C')
 			self.centroids_ptr = <double*> self.centroids.data
 			self.centroids_T = self.centroids.T.copy()
 			self.centroids_T_ptr = <double*> self.centroids_T.data
@@ -273,12 +276,12 @@ cdef class Kmeans(Model):
 
 		if n_jobs > 1:
 			with Parallel(n_jobs=n_jobs, backend='threading') as parallel:
-				y_pred = parallel(delayed(self.predict, check_pickle=False)(
+				y_pred = parallel(delayed(self.predict)(
 					X[start:end]) for start, end in zip(starts, ends))
 
 				return numpy.concatenate(y_pred)
 
-		X = numpy.array(X, dtype='float64')
+		X = numpy.asarray(X, dtype='float64', order='C')
 		cdef double* X_ptr = <double*> (<numpy.ndarray> X).data
 		cdef int n = len(X)
 
@@ -326,10 +329,10 @@ cdef class Kmeans(Model):
 		cdef double* X_ptr
 		cdef double* centroid
 
-		X = numpy.array(X, dtype='float64')
+		X = numpy.asarray(X, dtype='float64', order='C')
 		X_ptr = <double*> (<numpy.ndarray> X).data
 
-		dist = numpy.zeros((X.shape[0], self.k))
+		dist = numpy.empty((X.shape[0], self.k))
 
 
 		for i in range(X.shape[0]):
@@ -341,7 +344,7 @@ cdef class Kmeans(Model):
 
 	def fit(self, X, weights=None, inertia=0.0, stop_threshold=1e-3,
                 max_iterations=1e3, batch_size=None, batches_per_epoch=None,
-                clear_summaries=False, verbose=False, n_jobs=1):
+                clear_summaries=False, verbose=False, n_jobs=1, random_state=None):
 		"""Fit the model to the data using k centroids.
 
 		Parameters
@@ -364,7 +367,7 @@ cdef class Kmeans(Model):
 		stop_threshold : double, optional, positive
 			The threshold at which EM will terminate for the improvement of
 			the model. If the model does not improve its fit of the data by a
-			log probability of 0.1 then terminate. Default is 0.1.
+			log probability of the threshold then terminate. Default is 1e-3.
 
 		max_iterations : int, optional
 			The maximum number of iterations to run for. Default is 1e3.
@@ -399,14 +402,18 @@ cdef class Kmeans(Model):
 			The number of threads to use when processing data. Default to 1,
 			meaning no parallelism.
 
+        random_state : int, numpy.random.RandomState, or None
+            The random state used for generating samples. If set to none, a
+            random seed will be used. If set to either an integer or a
+            random seed, will produce deterministic outputs.
+
 		Returns
 		-------
 		self : Kmeans
 			This is the fit kmeans object.
 		"""
 
-		if not isinstance(X, numpy.ndarray):
-			X = numpy.array(X, dtype='float64')
+		X = numpy.asarray(X, dtype='float64', order='C')
 
 		n, d = X.shape
 
@@ -423,7 +430,7 @@ cdef class Kmeans(Model):
 		else:
 			starts = list(range(0, n, batch_size))
 			if starts[-1] == n:
-				starts = starts[:-1]
+				del starts[-1]
 			ends = list(range(batch_size, n, batch_size)) + [n]
 
 		if clear_summaries == 'auto':
@@ -444,11 +451,13 @@ cdef class Kmeans(Model):
 				iteration, improvement = 0, INF
 
 				if weights is not None and initial_centroids is None:
-					self.centroids = initialize_centroids(X[:ends[0]],
-						weights[:ends[0]], self.k, self.init)
+					self.centroids = _initialize_centroids(X=X[:ends[0]],
+						weights=weights[:ends[0]], k=self.k, init=self.init, 
+						random_state=random_state)
 				elif weights is None and initial_centroids is None:
-					self.centroids = initialize_centroids(X[:ends[0]],
-						None, self.k, self.init)
+					self.centroids = _initialize_centroids(X=X[:ends[0]],
+						weights=None, k=self.k, init=self.init, 
+						random_state=random_state)
 				else:
 					self.centroids = initial_centroids.copy()
 
@@ -472,13 +481,12 @@ cdef class Kmeans(Model):
 					self.from_summaries(inertia, clear_summaries)
 
 					if weights is not None:
-						distance_sum = sum(parallel(delayed(self.summarize,
-							check_pickle=False)(X[start:end], weights[start:end])
+						distance_sum = sum(parallel(delayed(self.summarize)(X[start:end], 
+							weights[start:end])
 							for start, end in zip(epoch_starts, epoch_ends)))
 					else:
-						distance_sum = sum(parallel(delayed(self.summarize,
-							check_pickle=False)(X[start:end]) for start, end in zip(
-								epoch_starts, epoch_ends)))
+						distance_sum = sum(parallel(delayed(self.summarize)(X[start:end]) 
+							for start, end in zip(epoch_starts, epoch_ends)))
 
 					if iteration == 0:
 						initial_distance_sum = distance_sum
@@ -540,7 +548,7 @@ cdef class Kmeans(Model):
 			probabilities.
 		"""
 
-		cdef numpy.ndarray X_ndarray = numpy.array(X, dtype='float64')
+		cdef numpy.ndarray X_ndarray = numpy.asarray(X, dtype='float64', order='C')
 		cdef double* X_ptr = <double*> X_ndarray.data
 
 		cdef numpy.ndarray weights_ndarray
@@ -550,7 +558,7 @@ cdef class Kmeans(Model):
 		if weights is None:
 			weights_ndarray = numpy.ones(n, dtype='float64')
 		else:
-			weights_ndarray = numpy.array(weights, dtype='float64')
+			weights_ndarray = numpy.asarray(weights, dtype='float64')
 
 		cdef double* weights_ptr = <double*> weights_ndarray.data
 
@@ -562,20 +570,12 @@ cdef class Kmeans(Model):
 	cdef double _summarize(self, double* X, double* weights, int n,
 		int column_idx, int d) nogil:
 		cdef int i, j, l, y, k = self.k, inc = 1
-		cdef double min_dist, dist, total_dist, pdist = 0.0
+		cdef double min_dist, dist, total_dist = 0.0, pdist
 		cdef double* summary_sizes = <double*> calloc(k*d, sizeof(double))
 		cdef double* summary_weights = <double*> calloc(k*d, sizeof(double))
-		memset(summary_sizes, 0, k*d*sizeof(double))
-		memset(summary_weights, 0, k*d*sizeof(double))
-
 		cdef double* dists = <double*> calloc(n*k, sizeof(double))
-		memset(dists, 0, n*k*sizeof(double))
-
-		cdef double* X_ = <double*> calloc(n*d, sizeof(double))
-		memset(X_, 0, n*d*sizeof(double))
-
+		cdef double* X_ = <double*> malloc(n*d*sizeof(double))
 		cdef double* bias = <double*> calloc(n*k, sizeof(double))
-		memset(bias, 0, n*k*sizeof(double))
 
 		for i in range(n):
 			for j in range(d):
@@ -679,27 +679,24 @@ cdef class Kmeans(Model):
 		memset(self.summary_sizes, 0, self.k*self.d*sizeof(double))
 		memset(self.summary_weights, 0, self.k*self.d*sizeof(double))
 
-	def to_json(self, separators=(',', ' : '), indent=4):
-		model = {
-					'class' : 'Kmeans',
-					'k' : self.k,
-					'centroids'  : self.centroids.tolist()
-				}
-
-		return json.dumps(model, separators=separators, indent=indent)
+	def to_dict(self):
+		return {
+			'class' : 'Kmeans',
+			'k' : self.k,
+			'centroids'  : self.centroids.tolist()
+		}
 
 	@classmethod
-	def from_json(cls, s):
-		d = json.loads(s)
-		model = Kmeans(d['k'], d['centroids'])
+	def from_dict(cls, d):
+		model = cls(d['k'], d['centroids'])
 		return model
 
 	@classmethod
 	def from_samples(cls, k, X, weights=None, init='kmeans++', n_init=10,
 		inertia=0.0, stop_threshold=0.1, max_iterations=1e3, batch_size=None,
-		batches_per_epoch=None, clear_summaries=False, verbose=False, n_jobs=1):
-		"""
-		Fit a k-means object to the data directly.
+		batches_per_epoch=None, clear_summaries=False, verbose=False, n_jobs=1,
+		random_state=None):
+		"""Fit a k-means object to the data directly.
 
 		Parameters
 		----------
@@ -771,17 +768,21 @@ cdef class Kmeans(Model):
 		n_jobs : int, optional
 			The number of threads to use. Default is 1, indicating no
 			parallelism is used.
+
+        random_state : int, numpy.random.RandomState, or None
+            The random state used for generating samples. If set to none, a
+            random seed will be used. If set to either an integer or a
+            random seed, will produce deterministic outputs.
 		"""
 
-		if not isinstance(X, numpy.ndarray):
-			X = numpy.array(X, dtype='float64')
+		X = numpy.asarray(X, dtype='float64', order='C')
 
 		n, d = X.shape
 
-		model = Kmeans(k=k, init=init, n_init=n_init)
+		model = cls(k=k, init=init, n_init=n_init)
 		model.fit(X, weights, inertia=inertia, stop_threshold=stop_threshold,
 			max_iterations=max_iterations, batch_size=batch_size,
 			batches_per_epoch=batches_per_epoch, clear_summaries=clear_summaries,
-			verbose=verbose, n_jobs=n_jobs)
+			verbose=verbose, n_jobs=n_jobs, random_state=random_state)
 
 		return model

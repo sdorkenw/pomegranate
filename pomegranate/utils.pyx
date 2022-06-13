@@ -2,50 +2,31 @@
 # Contact: Jacob Schreiber ( jmschreiber91@gmail.com )
 
 from libc.math cimport log as clog
-from libc.math cimport sqrt as csqrt
+from libc.math cimport log2 as clog2
 from libc.math cimport exp as cexp
 from libc.math cimport floor
 from libc.math cimport fabs
+from libc.stdlib cimport rand, RAND_MAX
+from libc.math cimport isnan
 
-from libc.stdlib cimport calloc, free
 from scipy.linalg.cython_blas cimport dgemm
 
-cimport numpy
+
+cimport cython
 import numpy
+cimport numpy
+
 import numbers
 
-import heapq, itertools
+import heapq
 
-try:
-	import tempfile
-	import pygraphviz
-	import matplotlib.pyplot as plt
-	import matplotlib.image
-except ImportError:
-	pygraphviz = None
-
-cdef int* GPU = <int*> calloc(1, sizeof(int))
-cdef int* has_cupy = <int*> calloc(1, sizeof(int))
-
-try:
-	import cupy
-	from cupy import cuda
-	cuda.Device().cublas_handle
-	enable_gpu()
-
-	global has_cupy
-	has_cupy[0] = 1
-except:
-	global has_cupy
-	has_cupy[0] = 0
+cdef bint GPU = False
+cdef int has_cupy = -1
 
 numpy.import_array()
 
 cdef extern from "numpy/ndarraytypes.h":
 	void PyArray_ENABLEFLAGS(numpy.ndarray X, int flags)
-
-cdef bint isnan(double x) nogil:
-	return npy_isnan(x)
 
 # Define some useful constants
 DEF NEGINF = float("-inf")
@@ -60,7 +41,6 @@ cdef class PriorityQueue(object):
 	cdef dict entries
 
 	def __init__(self):
-		self.n = 0
 		self.pq = []
 		self.entries = {}
 
@@ -92,24 +72,50 @@ cdef class PriorityQueue(object):
 			raise KeyError("Attempting to pop from an empty priority queue")
 
 
+def init_cupy():
+	global has_cupy
+
+	try:
+		from cupy import cuda
+		cuda.Device().cublas_handle
+		has_cupy = 1
+	except:
+		has_cupy = 0
+
+	return has_cupy
+
 def is_gpu_enabled():
 	global GPU
-	return bool(GPU[0])
 
-cdef int _is_gpu_enabled() nogil:
-	return GPU[0]
+	if has_cupy == -1 and init_cupy():
+		GPU = True
+
+	return GPU
+
+cdef bint _is_gpu_enabled() nogil:
+	global GPU
+
+	if has_cupy == -1:
+		with gil:
+			if init_cupy():
+				GPU = True
+
+	return GPU
 
 cpdef enable_gpu():
 	global GPU
-	
-	if has_cupy[0] == 0:
+
+	if has_cupy == -1:
+		init_cupy()
+
+	if not has_cupy:
 		raise Warning("Please install cupy before attempting to utilize a GPU.")
 	else:
-		GPU[0] = 1
+		GPU = True
 
 cpdef disable_gpu():
 	global GPU
-	GPU[0] = 0
+	GPU = False
 
 cdef ndarray_wrap_cpointer(void* data, numpy.npy_intp n):
 	cdef numpy.ndarray[numpy.float64_t, ndim=1] X = numpy.PyArray_SimpleNewFromData(1, &n, numpy.NPY_FLOAT64, data)
@@ -186,8 +192,14 @@ cdef double _log(double x) nogil:
 	A wrapper for the c log function, by returning negative infinity if the
 	input is 0.
 	'''
+	return clog(x) if x > 0 else NEGINF
 
-	return clog( x ) if x > 0 else NEGINF
+cdef double _log2(double x) nogil:
+	'''
+	A wrapper for the c log function, by returning negative infinity if the
+	input is 0.
+	'''
+	return clog2(x) if x > 0 else NEGINF
 
 cdef double pair_lse(double x, double y) nogil:
 	'''
@@ -212,7 +224,7 @@ cdef double pair_lse(double x, double y) nogil:
 def logsumexp(X):
 	"""Calculate the log-sum-exp of an array to add in log space."""
 
-	X = numpy.array(X, dtype='float64')
+	X = numpy.asarray(X, dtype='float64')
 	
 	cdef double* X_ptr = <double*> (<numpy.ndarray> X).data
 	cdef double x
@@ -238,8 +250,8 @@ def logsumexp(X):
 def logaddexp(X, Y):
 	"""Calculate the log-add-exp of a pair of arrays."""
 
-	X = numpy.array(X, dtype='float64')
-	Y = numpy.array(Y, dtype='float64')
+	X = numpy.asarray(X, dtype='float64')
+	Y = numpy.asarray(Y, dtype='float64')
 
 	if len(X.shape) != len(Y.shape):
 		raise ValueError("Both arrays must be of the same shape.")
@@ -302,7 +314,7 @@ cdef double gamma(double x) nogil:
 		return INF
 
 	if x < 0.001:
-		return 1.0 / (x * (1.0 + GAMMA * x));
+		return 1.0 / (x * (1.0 + GAMMA * x))
 
 	# Second interval: [0.001, 12).
 
@@ -349,7 +361,7 @@ cdef double gamma(double x) nogil:
 	# Correct answer too large to display, force +infinity.
 		return INF
 
-	return cexp(lgamma(x));
+	return cexp(lgamma(x))
 
 cdef double lgamma(double x) nogil:
 	# Abramowitz and Stegun 6.1.41
@@ -383,6 +395,11 @@ cdef double lgamma(double x) nogil:
 	return (x - 0.5) * clog(x) - x + HALF_LOG2_PI + sum / x
 
 def plot_networkx(Q, edge_label=None, filename=None):
+	import tempfile
+	import pygraphviz
+	import matplotlib.pyplot as plt
+	import matplotlib.image
+
 	G = pygraphviz.AGraph(directed=True)
 
 	for state in Q.nodes():
@@ -403,28 +420,35 @@ def plot_networkx(Q, edge_label=None, filename=None):
 	else:
 		G.draw(filename, format='pdf', prog='dot')
 
-def _check_input(X, keymap):
+def _check_input(X, keymap=None):
 	"""Check the input to make sure that it is a properly formatted array."""
 
 	cdef numpy.ndarray X_ndarray
 
 	try:
-		X_ndarray = numpy.array(X, dtype='float64', ndmin=2)
+		X_ndarray = numpy.array(X, dtype='float64', ndmin=2, order='C')
 	except:
 		if not isinstance(X, (numpy.ndarray, list, tuple)):
-			X_ndarray = numpy.array(keymap[0][X], dtype='float64', ndmin=2)
+			X_ndarray = numpy.array(keymap[0][X], dtype='float64',
+			                        ndmin=2, order='C')
 		else:
 			X = numpy.array(X)
-			X_ndarray = numpy.empty(X.shape, dtype='float64')
+			X_ndarray = numpy.empty(X.shape, dtype='float64', order='C')
 
 			if X.ndim == 1:
 				for i in range(X.shape[0]):
 					X_ndarray[i] = keymap[0][X[i]]
 				X_ndarray = X_ndarray.reshape(-1, 1)
 			else:
-				for i in range(X.shape[0]):
-					for j in range(X.shape[1]):
-						X_ndarray[i, j] = keymap[j][X[i, j]]
+				for j in range(X.shape[1]):
+					if len(keymap[j]) == 0: 
+						# No keymap for non-discrete distributions
+						# convert the whole column to floats;
+						X_ndarray[:, j] = X[:, j].astype(numpy.float64)
+					else:
+						# else convert entries via the keymap
+						for i in range(X.shape[0]):
+							X_ndarray[i, j] = keymap[j][X[i, j]]
 
 
 	return X_ndarray
@@ -447,21 +471,17 @@ def weight_set(items, weights):
 	if weights is None: # Weight everything 1 if no weights specified
 		weights = numpy.ones(items.shape[0], dtype=numpy.float64)
 	else: # Force whatever we have to be a Numpy array
-		weights = numpy.array(weights, dtype=numpy.float64)
+		weights = numpy.asarray(weights, dtype=numpy.float64)
 
 	return items, weights
 
 def _check_nan(X):
 	"""Checks to see if a value is nan, either as a float or a string."""
-	
 	if isinstance(X, (str, unicode, numpy.string_)):
-		if X == 'nan':
-			return True
-		return False
-
-	if X is None or numpy.isnan(X):
-		return True
-	return False
+		return X == 'nan'
+	if isinstance(X, (float, numpy.float32, numpy.float64)):
+		return isnan(X)
+	return X is None
 
 def check_random_state(seed):
 	"""Turn seed into a np.random.RandomState instance.
@@ -487,4 +507,24 @@ def check_random_state(seed):
 		return seed
 	raise ValueError('%r cannot be used to seed a numpy.random.RandomState'
 					 ' instance' % seed)
-	
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.nonecheck(False)
+@cython.cdivision(True)
+cdef choose_one(double [:] weights, int length):
+
+	cdef int  i
+	cdef double cs
+	cdef double random
+
+	random = rand()*1./(RAND_MAX)
+
+	cs = 0.0
+	i = 0
+	while cs <= random and i < length:
+		cs += weights[i]
+		i += 1
+	return i-1
+

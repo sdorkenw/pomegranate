@@ -2,6 +2,8 @@ from __future__ import (division)
 
 from pomegranate import *
 from pomegranate.parallel import log_probability
+from pomegranate.io import SequenceGenerator
+
 from nose.tools import with_setup
 from nose.tools import assert_almost_equal
 from nose.tools import assert_equal
@@ -11,6 +13,7 @@ from nose.tools import assert_raises
 from nose.tools import assert_greater
 from numpy.testing import assert_array_almost_equal
 from numpy.testing import assert_array_equal
+
 import pickle
 import random
 import numpy
@@ -589,7 +592,7 @@ def test_hmm_multivariate_mixed_dense_predict_log_proba():
     assert_array_almost_equal(f, logp)
 
 @with_setup(setup_multivariate_mixed_dense)
-def test_hmm_multivariate_mixed_dense_predict_log_proba_json_yaml():
+def test_hmm_multivariate_mixed_dense_predict_log_proba_from_json():
     logp = numpy.array([[-1.3e-07, -32.35011618, -15.88142452, -48.83251208],
         [-0.0, -125.38948844, -20.25379271, -140.90667878],
         [-3.29e-06, -178.10391312, -12.6258323, -138.86820172]])
@@ -598,8 +601,27 @@ def test_hmm_multivariate_mixed_dense_predict_log_proba_json_yaml():
     hmm_json = HiddenMarkovModel.from_json(model.to_json())
     f = hmm_json.predict_log_proba(s)
     assert_array_almost_equal(f, logp)
+
+@with_setup(setup_multivariate_mixed_dense)
+def test_hmm_multivariate_mixed_dense_predict_log_proba_from_yaml():
+    logp = numpy.array([[-1.3e-07, -32.35011618, -15.88142452, -48.83251208],
+        [-0.0, -125.38948844, -20.25379271, -140.90667878],
+        [-3.29e-06, -178.10391312, -12.6258323, -138.86820172]])
+
+    s = [[0, 1, 5, 2, 3], [2, 4, 1, 5, 6], [4, 6, 2, 0, 1]]
     hmm_yaml = HiddenMarkovModel.from_yaml(model.to_yaml())
     f = hmm_yaml.predict_log_proba(s)
+    assert_array_almost_equal(f, logp)
+
+@with_setup(setup_multivariate_mixed_dense)
+def test_hmm_multivariate_mixed_dense_robust_from_json():
+    logp = numpy.array([[-1.3e-07, -32.35011618, -15.88142452, -48.83251208],
+        [-0.0, -125.38948844, -20.25379271, -140.90667878],
+        [-3.29e-06, -178.10391312, -12.6258323, -138.86820172]])
+
+    s = [[0, 1, 5, 2, 3], [2, 4, 1, 5, 6], [4, 6, 2, 0, 1]]
+    hmm_json = from_json(model.to_json())
+    f = hmm_json.predict_log_proba(s)
     assert_array_almost_equal(f, logp)
 
 @with_setup(setup_multivariate_gaussian_dense)
@@ -613,7 +635,7 @@ def test_hmm_multivariate_gaussian_dense_predict_log_proba():
 
 
 @with_setup(setup_multivariate_gaussian_dense)
-def test_hmm_multivariate_gaussian_dense_predict_log_proba_json_yaml():
+def test_hmm_multivariate_gaussian_dense_predict_log_proba_from_json():
     logp = numpy.array([[-0.01065581, -8.64827112, -4.56452191, -11.62376426],
         [-3.5e-07, -21.03621875, -14.85696805, -21.01998258],
         [-18.86968176, -0.07127267, -3.75635416, -3.09173086]])
@@ -622,10 +644,28 @@ def test_hmm_multivariate_gaussian_dense_predict_log_proba_json_yaml():
     hmm_json = HiddenMarkovModel.from_json(model.to_json())
     f = hmm_json.predict_log_proba(s)
     assert_array_almost_equal(f, logp)
+
+@with_setup(setup_multivariate_gaussian_dense)
+def test_hmm_multivariate_gaussian_dense_predict_log_proba_from_yaml():
+    logp = numpy.array([[-0.01065581, -8.64827112, -4.56452191, -11.62376426],
+        [-3.5e-07, -21.03621875, -14.85696805, -21.01998258],
+        [-18.86968176, -0.07127267, -3.75635416, -3.09173086]])
+
+    s = [[0, 1, 5, 2, 3], [2, 4, 1, 5, 6], [-4, 6, -2, 0, 1]]
     hmm_yaml = HiddenMarkovModel.from_yaml(model.to_yaml())
     f = hmm_yaml.predict_log_proba(s)
     assert_array_almost_equal(f, logp)
 
+@with_setup(setup_multivariate_gaussian_dense)
+def test_hmm_multivariate_gaussian_dense_robust_from_json():
+    logp = numpy.array([[-0.01065581, -8.64827112, -4.56452191, -11.62376426],
+        [-3.5e-07, -21.03621875, -14.85696805, -21.01998258],
+        [-18.86968176, -0.07127267, -3.75635416, -3.09173086]])
+
+    s = [[0, 1, 5, 2, 3], [2, 4, 1, 5, 6], [-4, 6, -2, 0, 1]]
+    hmm_json = from_json(model.to_json())
+    f = hmm_json.predict_log_proba(s)
+    assert_array_almost_equal(f, logp)
 
 @with_setup(setup_univariate_discrete_dense)
 def test_hmm_univariate_discrete_dense_nan_predict_log_proba():
@@ -1075,6 +1115,21 @@ def test_hmm_viterbi_fit_w_pseudocount_inertia():
     total_improvement = history.total_improvement[-1]
     assert_equal(round(total_improvement, 4), 83.2834)
 
+@with_setup(setup, teardown)
+def test_hmm_viterbi_fit_one_check_input():
+    seqs = [list(x) for x in ['ACT', 'ACT', 'ACC', 'ACTC', 'ACT', 'ACT', 'CCT',
+    'CCC', 'AAT', 'CT', 'AT', 'CT', 'CT', 'CT', 'CT', 'CT', 'CT',
+    'ACT', 'ACT', 'CT', 'ACT', 'CT', 'CT', 'CT', 'CT']]
+
+    _, history = model.fit(seqs,
+                               return_history=True,
+                               algorithm='viterbi',
+                               verbose=False,
+                               use_pseudocount=True,
+                               multiple_check_input=False)
+
+    total_improvement = history.total_improvement[-1]
+    assert_equal(round(total_improvement, 4), 83.2834)
 
 @with_setup(setup, teardown)
 def test_hmm_bw_fit():
@@ -1125,6 +1180,27 @@ def test_hmm_bw_multivariate_discrete_fit_json_yaml():
     total_improvement = history.total_improvement[-1]
     assert_equal(round(total_improvement, 4), 13.3622)
 
+@with_setup(setup_multivariate_discrete_sparse, teardown)
+def test_hmm_bw_multivariate_discrete_fit_robust_from_json():
+    seqs = [[['A', 'A'], ['A', 'C'], ['C', 'T']], [['A', 'A'], ['C', 'C'], ['T', 'T']],
+            [['A', 'A'], ['A', 'C'], ['C', 'C'], ['T', 'T']], [['A', 'A'], ['C', 'C']]]
+
+    hmm_json = from_json(model.to_json())
+    _, history = hmm_json.fit(seqs,
+                               return_history=True,
+                                     algorithm='baum-welch',
+                                     verbose=False,
+                                     use_pseudocount=True,
+                                     max_iterations=5)
+
+    total_improvement = history.total_improvement[-1]
+    assert_equal(round(total_improvement, 4), 13.3622)
+
+@with_setup(setup_multivariate_discrete_sparse, teardown)
+def test_hmm_bw_multivariate_discrete_fit_from_yaml():
+    seqs = [[['A', 'A'], ['A', 'C'], ['C', 'T']], [['A', 'A'], ['C', 'C'], ['T', 'T']],
+            [['A', 'A'], ['A', 'C'], ['C', 'C'], ['T', 'T']], [['A', 'A'], ['C', 'C']]]
+
     hmm_yaml = HiddenMarkovModel.from_yaml(model.to_yaml())
     _, history = hmm_yaml.fit(seqs,
                               return_history=True,
@@ -1153,7 +1229,7 @@ def test_hmm_bw_multivariate_gaussian_fit():
     assert_equal(round(total_improvement, 4), 24.7013)
 
 @with_setup(setup_multivariate_gaussian_sparse, teardown)
-def test_hmm_bw_multivariate_gaussian_json_yaml():
+def test_hmm_bw_multivariate_gaussian_from_json():
     seqs = [[[5, 8], [8, 10], [13, 17], [-3, -4]], [[6, 7], [13, 16], [12, 11], [-6, -7]],
             [[4, 6], [13, 15], [-4, -7]], [[6, 5], [14, 18], [-7, -5]]]
 
@@ -1167,6 +1243,28 @@ def test_hmm_bw_multivariate_gaussian_json_yaml():
 
     total_improvement = history.total_improvement[-1]
     assert_equal(round(total_improvement, 4), 24.7013)
+
+@with_setup(setup_multivariate_gaussian_sparse, teardown)
+def test_hmm_bw_multivariate_gaussian_robust_from_json():
+    seqs = [[[5, 8], [8, 10], [13, 17], [-3, -4]], [[6, 7], [13, 16], [12, 11], [-6, -7]],
+            [[4, 6], [13, 15], [-4, -7]], [[6, 5], [14, 18], [-7, -5]]]
+
+    hmm_json = from_json(model.to_json())
+    _, history = hmm_json.fit(seqs,
+                               return_history=True,
+                                     algorithm='baum-welch',
+                                     verbose=False,
+                                     use_pseudocount=True,
+                                     max_iterations=5)
+
+    total_improvement = history.total_improvement[-1]
+    assert_equal(round(total_improvement, 4), 24.7013)
+
+@with_setup(setup_multivariate_gaussian_sparse, teardown)
+def test_hmm_bw_multivariate_gaussian_from_yaml(): 
+    seqs = [[[5, 8], [8, 10], [13, 17], [-3, -4]], [[6, 7], [13, 16], [12, 11], [-6, -7]],
+            [[4, 6], [13, 15], [-4, -7]], [[6, 5], [14, 18], [-7, -5]]]
+            
     hmm_yaml = HiddenMarkovModel.from_yaml(model.to_yaml())
     _, history = hmm_yaml.fit(seqs,
                               return_history=True,
@@ -1199,6 +1297,26 @@ def test_hmm_bw_fit_json():
     hmm = HiddenMarkovModel.from_json(model.to_json())
     assert_almost_equal(sum(model.log_probability(seq) for seq in seqs), -42.2341, 4)
 
+@with_setup(setup, teardown)
+def test_hmm_bw_fit_robust_from_json():
+    seqs = [list(x) for x in ['ACT', 'ACT', 'ACC', 'ACTC', 'ACT', 'ACT', 'CCT',
+        'CCC', 'AAT', 'CT', 'AT', 'CT', 'CT', 'CT', 'CT', 'CT', 'CT',
+        'ACT', 'ACT', 'CT', 'ACT', 'CT', 'CT', 'CT', 'CT']]
+
+    _, history = model.fit(seqs,
+                               return_history=True,
+                                     algorithm='baum-welch',
+                                     verbose=False,
+                                     use_pseudocount=True,
+                                     max_iterations=5)
+
+    total_improvement = history.total_improvement[-1]
+
+    assert_equal(round(total_improvement, 4), 83.1132)
+    assert_almost_equal(sum(model.log_probability(seq) for seq in seqs), -42.2341, 4)
+
+    hmm = from_json(model.to_json())
+    assert_almost_equal(sum(model.log_probability(seq) for seq in seqs), -42.2341, 4)
 
 @with_setup(setup, teardown)
 def test_hmm_bw_fit_no_pseudocount():
@@ -1538,6 +1656,22 @@ def test_hmm_bw_fit_w_edge_a_distribution_inertia():
     total_improvement = history.total_improvement[-1]
     assert_equal(round(total_improvement, 4), 81.5447)
 
+@with_setup(setup, teardown)
+def test_hmm_bw_fit_one_check_input():
+    seqs = [list(x) for x in ['ACT', 'ACT', 'ACC', 'ACTC', 'ACT', 'ACT', 'CCT',
+        'CCC', 'AAT', 'CT', 'AT', 'CT', 'CT', 'CT', 'CT', 'CT', 'CT',
+        'ACT', 'ACT', 'CT', 'ACT', 'CT', 'CT', 'CT', 'CT']]
+
+    _, history = model.fit(seqs,
+                               return_history=True,
+                                     algorithm='baum-welch',
+                                     verbose=False,
+                                     use_pseudocount=True,
+                                     max_iterations=5,
+                                     multiple_check_input=False)
+
+    total_improvement = history.total_improvement[-1]
+    assert_equal(round(total_improvement, 4), 83.1132)
 
 def test_hmm_initialization():
     hmmd1 = HiddenMarkovModel()
@@ -1625,6 +1759,18 @@ def test_hmm_json_univariate():
 
         assert_almost_equal(logp1, logp2)
 
+@with_setup(setup_univariate_gaussian_dense)
+def test_hmm_robust_from_json_univariate():
+    model2 = from_json(model.to_json())
+
+    random_state = numpy.random.RandomState(0)
+    for i in range(10):
+        sequence = random_state.normal(0, 1, size=10)
+
+        logp1 = model.log_probability(sequence)
+        logp2 = model2.log_probability(sequence)
+
+        assert_almost_equal(logp1, logp2)
 
 @with_setup(setup_multivariate_gaussian_dense)
 def test_hmm_pickle_multivariate():
@@ -1641,7 +1787,7 @@ def test_hmm_pickle_multivariate():
 
 
 @with_setup(setup_multivariate_gaussian_dense)
-def test_hmm_json_univariate():
+def test_hmm_json_multivariate():
     model2 = HiddenMarkovModel.from_json(model.to_json())
 
     random_state = numpy.random.RandomState(0)
@@ -1653,6 +1799,18 @@ def test_hmm_json_univariate():
 
         assert_almost_equal(logp1, logp2)
 
+@with_setup(setup_multivariate_gaussian_dense)
+def test_hmm_robust_from_json_multivariate():
+    model2 = from_json(model.to_json())
+
+    random_state = numpy.random.RandomState(0)
+    for i in range(10):
+        sequence = random_state.normal(0, 1, size=(10, 5))
+
+        logp1 = model.log_probability(sequence)
+        logp2 = model2.log_probability(sequence)
+
+        assert_almost_equal(logp1, logp2)
 
 @with_setup(setup_univariate_discrete_dense, teardown)
 def test_hmm_univariate_discrete_from_samples():
@@ -1678,6 +1836,17 @@ def test_hmm_univariate_discrete_from_samples_with_labels():
 
     assert_greater(logp2, logp1)
 
+@with_setup(setup_univariate_discrete_dense, teardown)
+def test_hmm_univariate_discrete_from_samples_one_check_input():
+    X = [model.sample(random_state=0) for i in range(25)]
+    model2 = HiddenMarkovModel.from_samples(DiscreteDistribution, 4, X, 
+                                            max_iterations=25,
+                                            multiple_check_input=False)
+
+    logp1 = sum(map(model.log_probability, X))
+    logp2 = sum(map(model2.log_probability, X))
+
+    assert_greater(logp2, logp1)
 
 @with_setup(setup_univariate_gaussian_dense, teardown)
 def test_hmm_univariate_gaussian_from_samples():
@@ -1722,39 +1891,6 @@ def test_hmm_univariate_discrete_from_samples_no_end_state():
     assert_equal(model2.dense_transition_matrix()[2][model2.end_index],0)
     assert_equal(model2.dense_transition_matrix()[3][model2.end_index],0)
 
-def test_hmm_multivariate_gaussian_ooc():
-    random_state = numpy.random.RandomState(0)
-    X = numpy.concatenate([random_state.normal(0, 1, size=(100, 15, 3)) + i for i in range(3)])
-
-    hmm = HiddenMarkovModel.from_samples(MultivariateGaussianDistribution,
-        3, X, init='first-k', max_iterations=5)
-    hmm2 = HiddenMarkovModel.from_samples(MultivariateGaussianDistribution,
-        3, X, init='first-k', max_iterations=5, batch_size=25)
-    hmm3 = HiddenMarkovModel.from_samples(MultivariateGaussianDistribution,
-        3, X, init='first-k', max_iterations=5, batch_size=25, batches_per_epoch=2)
-
-    assert_almost_equal(hmm.log_probability(X[0]), hmm2.log_probability(X[0]))
-    assert_not_equal(hmm.log_probability(X[0]), hmm3.log_probability(X[0]))
-
-def test_hmm_multivariate_gaussian_minibatch():
-    random_state = numpy.random.RandomState(0)
-    X = numpy.concatenate([random_state.normal(0, 1, size=(100, 15, 3)) + i for i in range(3)])
-
-    hmm = HiddenMarkovModel.from_samples(MultivariateGaussianDistribution,
-        3, X, init='first-k', max_iterations=5)
-    hmm2 = HiddenMarkovModel.from_samples(MultivariateGaussianDistribution,
-        3, X, init='first-k', max_iterations=5, batch_size=50, batches_per_epoch=1)
-    hmm3 = HiddenMarkovModel.from_samples(MultivariateGaussianDistribution,
-        3, X, init='first-k', max_iterations=5, batch_size=50, batches_per_epoch=4)
-    hmm4 = HiddenMarkovModel.from_samples(MultivariateGaussianDistribution,
-        3, X, init='first-k', max_iterations=5, batch_size=100, batches_per_epoch=2)
-
-    assert_not_equal(hmm.log_probability(X[0]), hmm2.log_probability(X[0]))
-    assert_not_equal(hmm.log_probability(X[0]), hmm4.log_probability(X[0]))
-    assert_not_equal(hmm2.log_probability(X[0]), hmm3.log_probability(X[0]))
-    assert_almost_equal(hmm3.log_probability(X[0]), hmm4.log_probability(X[0]))
-
-
 @with_setup(setup_general_mixture_gaussian, teardown)
 def test_hmm_json_general_mixture_gaussian():
     model2 = HiddenMarkovModel.from_json(model.to_json())
@@ -1766,3 +1902,68 @@ def test_hmm_json_general_mixture_gaussian():
         logp2 = model2.log_probability(sequence)
 
         assert_almost_equal(logp1, logp2)
+
+@with_setup(setup_general_mixture_gaussian, teardown)
+def test_hmm_robust_from_json_general_mixture_gaussian():
+    model2 = from_json(model.to_json())
+    random_state = numpy.random.RandomState(0)
+    for i in range(10):
+        sequence = random_state.normal(0, 1, size=10)
+
+        logp1 = model.log_probability(sequence)
+        logp2 = model2.log_probability(sequence)
+
+        assert_almost_equal(logp1, logp2)
+
+def test_io_fit():
+    X = [numpy.random.choice(['A', 'B'], size=25) for i in range(20)]
+    weights = numpy.abs(numpy.random.randn(20))
+    data_generator = SequenceGenerator(X, weights)
+
+    s1 = State(DiscreteDistribution({'A': 0.3, 'B': 0.7}))
+    s2 = State(DiscreteDistribution({'A': 0.9, 'B': 0.1}))
+    model1 = HiddenMarkovModel()
+    model1.add_states(s1, s2)
+    model1.add_transition(model1.start, s1, 0.8)
+    model1.add_transition(model1.start, s2, 0.2)
+    model1.add_transition(s1, s1, 0.3)
+    model1.add_transition(s1, s2, 0.7)
+    model1.add_transition(s2, s1, 0.4)
+    model1.add_transition(s2, s2, 0.6)
+    model1.bake()
+    model1.fit(X, weights=weights, max_iterations=5)
+
+    s1 = State(DiscreteDistribution({'A': 0.3, 'B': 0.7}))
+    s2 = State(DiscreteDistribution({'A': 0.9, 'B': 0.1}))
+    model2 = HiddenMarkovModel()
+    model2.add_states(s1, s2)
+    model2.add_transition(model2.start, s1, 0.8)
+    model2.add_transition(model2.start, s2, 0.2)
+    model2.add_transition(s1, s1, 0.3)
+    model2.add_transition(s1, s2, 0.7)
+    model2.add_transition(s2, s1, 0.4)
+    model2.add_transition(s2, s2, 0.6)
+    model2.bake()
+    model2.fit(X, weights=weights, max_iterations=5)
+
+    logp1 = [model1.log_probability(x) for x in X]
+    logp2 = [model2.log_probability(x) for x in X]
+
+    assert_array_almost_equal(logp1, logp2)
+
+def test_io_from_samples_hmm():
+    X = [numpy.random.choice(['A', 'B'], size=25) for i in range(20)]
+    weights = numpy.abs(numpy.random.randn(20))
+    data_generator = SequenceGenerator(X, weights)
+
+    model1 = HiddenMarkovModel.from_samples(DiscreteDistribution,
+        n_components=2, X=X, weights=weights, max_iterations=5,
+        init='first-k', random_state=1)
+    model2 = HiddenMarkovModel.from_samples(DiscreteDistribution,
+        n_components=2, X=data_generator, max_iterations=5,
+        init='first-k', random_state=1)
+
+    logp1 = [model1.log_probability(x) for x in X]
+    logp2 = [model2.log_probability(x) for x in X]
+
+    assert_array_almost_equal(logp1, logp2)

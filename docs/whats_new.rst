@@ -5,6 +5,228 @@
 Release History
 ===============
 
+Version 0.14.8
+==============
+
+Highlights
+----------
+
+	- Fix an issue with saving and loading BayesModels
+	
+
+Version 0.14.6
+==============
+
+Highlights
+----------
+
+	- Adds ICD support for features having both discrete and continuous distributions. Thanks @lmcinnes!
+
+Version 0.14.6
+==============
+
+Highlights
+----------
+
+	- Determinism added to k-means initializations through a `random_state` parameter
+	- Determinism added to `HiddenMarkovModel.from_samples` by passing its `random_state` parameter to k-means
+	- Fixed an issue where the JSON of an HMM would be updated after a call to `fit` but not a call to `from_summaries`
+	- Fixed an issue where independent component distributions would not be created correctly for HMM states when also passing in labels
+	- Separated out the initialization of distributions in `HiddenMarkovModel.from_samples` and the extraction or labeling of unlabeled examples
+	- Updated the NetworkX requirement to be at least 2.4.
+	- Force GMM models to respect its `frozen` attribute in the `from_summaries` method.
+
+
+Version 0.14.0
+==============
+
+Highlights
+----------
+
+	- A variety of minor bug fixes and enhancements
+	- Installations should be cleaner due to a transition from TravisCI/appveyor to GitHub actions. 
+
+BayesModels
+-----------
+	
+	- These models should now be able to fit to IndependentComponentDistributions.
+
+
+
+Version 0.13.1
+==============
+
+Highlights
+----------
+
+	- A variety of minor bug fixes and speed improvements
+	- Bayesian networks now support sampling using a Gibbs sampler or rejection sampling. Thanks @pascal-schetelat
+	- HMMs now have the option to disable rechecking the inputs at each iteration, which can dramatically speed up training for small models.
+
+General
+-------
+	
+	- pomegranate will now use `numpy.asarray` instead of `numpy.array` to avoid re-copying arrays.
+
+
+BayesianNetwork
+---------------
+	
+	- An error will now appropriately be raised when passing in constraints and selecting the Chow-Liu algorithm.
+	- Bayesian networks will now use 32-bit floats instead of 64-bit floats internally, leading to lower memory models. Thanks @alexhenrie
+
+
+
+Version 0.13.0
+==============
+
+Highlights
+----------
+
+	- A variety of minor bug fixes and speed improvements
+	- You can now pass in key sets to each model to define distributions over, even if that symbol doesn't occur in the training set
+	- The returns from `from_sample` uses class distributions instead of predefined ones, allowing for inheritance of distributions
+	- Checks added to ensure that input arrays are C ordered instead of transposed
+
+Distributions
+-------------
+
+	- JSON dtypes are checked to be numpy types instead of assumed to be
+	- __eq__ and __mul__ sped up for DiscreteDistributions
+
+
+BayesianNetwork
+---------------
+	- Fixed bug with constraint graphs when a node has both self loop and parent constraints
+
+MarkovChains
+------------
+
+	- Fixed an issue with sampling length.
+
+Version 0.12.1
+==============
+
+Highlights
+----------
+
+	- A variety of minor bug fixes.
+
+
+Version 0.12.0
+==============
+
+Highlights
+----------
+
+	- MarkovNetwork models have been added in and include both inference and structure learning.
+	- Support for Python 2 has been deprecated.
+	- Markov network, data generator, and callback tutorials have been added in
+	- A robust `from_json` method has been added in to __init__.py that can deserialize JSONs from any pomegranate model.
+
+MarkovNetwork
+-------------
+	
+	- MarkovNetwork models have been added in as a new probabilistic model.
+	- Loopy belief propagation inference has been added in using the FactorGraph backend
+	- Structure learning has been added in using Chow-Liu trees
+
+BayesianNetwork
+---------------
+
+	- Chow-Liu tree building has been sped up slightly, courtesy of @alexhenrie
+	- Chow-Liu tree building was further sped up by almost an order of magnitude
+	- Constraint Graphs no longer fail when passing in graphs with self loops, courtesy of @alexhenrie
+
+BayesClassifier
+---------------
+
+	- Updated the `from_samples` method to accept BayesianNetwork as an emission. This will build one Bayesian network for each class and use them as the emissions.
+
+Distributions
+-------------
+
+	- Added a warning to DiscreteDistribution when the user passes in an empty dictionary.
+	- Fixed the sampling procedure for JointProbabilityTables. 
+	- GammaDistributions should have their shape issue resolved
+	- The documentation for BetaDistributions has been updated to specify that it is a Beta-Bernoulli distribution. 
+
+io
+---
+	
+	- New file added, io.py, that contains data generators that can be operated on
+	- Added DataGenerator, DataFrameGenerator, and a BaseGenerator class to inherit from 
+
+HiddenMarkovModel
+-----------------
+
+	- Added RandomState parameter to `from_samples` to account for randomness when building discrete models.
+
+Misc
+----
+
+	- Unneccessary calls to memset have been removed, courtesy of @alexhenrie
+	- Checking for missing values has been slightly refactored to be cleaner, courtesy of @mareksmid-lucid
+	- Include the LICENSE file in MANIFEST.in and simplify a bit, courtesy of @toddrme2178
+	- Added in a robust from_json method that can be used to deserialize a JSON for any pomegranate model.
+
+docs
+----
+
+	- Added io.rst to briefly describe data generators
+	- Added MarkovNetwork.rst to describe Markov networks
+	- Added links to tutorials that did not have tutorials linked to them.
+
+Tutorials
+---------
+	
+	- Added in a tutorial notebook for Markov networks
+	- Added in a tutorial notebook for data generators
+	- Added in a tutorial notebook for callbacks
+
+CI
+--
+
+	- Removed unit tests for Py2.7 from AppVeyor and Travis
+	- Added unit tests for Py3.8 to AppVeyor and Travis 
+
+Version 0.11.2
+==============
+
+Highlights
+----------
+
+	- Faster BSNL, particularly when there is missing data, courtesy of @alexhenrie
+	- GPU acceleration should be fixed
+
+BayesianNetwork
+---------------
+
+	- A speed improvement by making `isnan` an inline function, courtesy of @alexhenrie
+	- A speed improvement by changing the manner that parent sets are iterated, courtesy of @alexhenrie
+
+Utils
+-----
+
+	- The `enable_gpu` call has been moved to the bottom of the GPU checking code and so should not crash anymore.
+
+Version 0.11.1
+==============
+
+Highlights
+----------
+
+	- Added speed improvements to Bayesian network structure learning when missing data is present.
+
+BayesianNetwork
+---------------
+
+	- By default duplicates get merged in a data set so that there are fewer rows with larger weights, dramatically improving speed. However, because `np.nan != np.nan`, rows with missing values don't get merged. This fix changes `np.nan` to `None` so that the rows get merged appropriately.
+
+	- A few misc changes that sometimes improve speed.
+
+	- Changed the probability calculation when a node is being scored given a single row. Previously it would return 0, meaning that sometimes it will return the densest graph possible erroneously. This may change your networks in edge cases, but will reduce their complexity.
+
 Version 0.11.0
 ==============
 

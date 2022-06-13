@@ -6,20 +6,17 @@
 
 from libc.stdlib cimport calloc
 from libc.stdlib cimport free
+from libc.stdlib cimport malloc
 from libc.string cimport memset
 from libc.math cimport exp as cexp
 
 from ..utils cimport _log
 from ..utils cimport isnan
 from ..utils import check_random_state
+from ..utils import _check_nan
 
 import itertools as it
-import json
 import numpy
-import random
-import scipy
-
-from collections import OrderedDict
 
 from .DiscreteDistribution import DiscreteDistribution
 
@@ -31,43 +28,41 @@ cdef class JointProbabilityTable(MultivariateDistribution):
 	by the marginals of each parent.
 	"""
 
-	def __cinit__(self, table, parents, frozen=False):
+	def __cinit__(self, table, parents=None, frozen=False):
 		"""
 		Take in the distribution represented as a list of lists, where each
 		inner list represents a row.
 		"""
 
 		self.name = "JointProbabilityTable"
-		self.frozen = False
-		self.m = len(parents)
+		self.d = len(parents) if parents is not None else len(table[0]) - 1
+		self.m = len(parents) if parents is not None else len(table[0]) - 1
 		self.n = len(table)
 		self.k = len(set(row[-2] for row in table))
-		self.idxs = <int*> calloc(self.m+1, sizeof(int))
+		self.idxs = <int*> malloc((self.m+1)*sizeof(int))
 
-		self.values = <double*> calloc(self.n, sizeof(double))
+		self.values = <double*> malloc(self.n*sizeof(double))
 		self.counts = <double*> calloc(self.n, sizeof(double))
-		self.count = 0
+
+		self.n_columns = self.d
 
 		self.dtypes = []
 		for column in table[0]:
 			dtype = str(type(column)).split()[-1].strip('>').strip("'")
 			self.dtypes.append(dtype)
 
-		memset(self.counts, 0, self.n*sizeof(double))
-
 		self.idxs[0] = 1
-		self.idxs[1] = self.k
 		for i in range(self.m-1):
-			self.idxs[i+2] = len(parents[self.m-i-1])
+			self.idxs[i+1] = len(set(row[self.m-i-2] for row in table))
+		self.idxs[self.m] = 0
 
-		keys = []
+		self.keymap = {}
 		for i, row in enumerate(table):
-			keys.append((tuple(row[:-1]), i))
+			self.keymap[tuple(row[:-1])] = i
 			self.values[i] = _log(row[-1])
 
-		self.keymap = OrderedDict(keys)
-		self.parents = parents
-		self.parameters = [[list(row) for row in table], self.parents]
+		self.parents = list(parents) if parents is not None else None
+		self.parameters = [[list(row) for row in table], self.parents, self.keymap]
 
 	def __dealloc__(self):
 		free(self.idxs)
@@ -88,9 +83,10 @@ cdef class JointProbabilityTable(MultivariateDistribution):
 	def sample(self, n=None, random_state=None):
 		random_state = check_random_state(random_state)
 		a = random_state.uniform(0, 1)
+		values = numpy.cumsum(numpy.exp([self.values[i] for i in range(self.n)]))
 		for i in range(self.n):
-			if cexp(self.values[i]) > a:
-				return self.keymap.keys()[i][-1]
+			if values[i] > a:
+				return list(self.keymap.keys())[i]
 
 	def bake(self, keys):
 		"""Order the inputs according to some external global ordering."""
@@ -104,10 +100,10 @@ cdef class JointProbabilityTable(MultivariateDistribution):
 		for i in range(len(keys)):
 			self.values[i] = values[i]
 
-		self.keymap = OrderedDict(keymap)
+		self.keymap = dict(keymap)
 
 	def keys(self):
-		return tuple(set(row[-1] for row in self.parameters[2].keys()))
+		return tuple(row for row in self.parameters[2].keys())
 
 	def log_probability(self, X):
 		"""
@@ -115,27 +111,35 @@ cdef class JointProbabilityTable(MultivariateDistribution):
 		ordering, like the training data.
 		"""
 
-		X = tuple(X)
+		X = numpy.array(X, ndmin=2, dtype=object)
 
-		if 'nan' in X or numpy.nan in X or None in X:
-			return 0.
+		log_probabilities = numpy.zeros(X.shape[0])
+		for i, x in enumerate(X):
+			x = tuple(x)
 
-		key = self.keymap[X]
-		return self.values[key]
+			for x_ in x:
+				if _check_nan(x_):
+					break
+			else:
+				key = self.keymap[x]
+				log_probabilities[i] = self.values[key]
 
-	cdef void _log_probability(self, double* X, double* log_probability, int n) nogil:
-		cdef int i, j, idx, is_na
+		if X.shape[0] == 1:
+			return log_probabilities[0]
+		return log_probabilities
+
+	cdef void _log_probability(self, double* X, double* log_probability, 
+		int n) nogil:
+		cdef int i, j, idx
 
 		for i in range(n):
-			idx, is_na = 0, 0
+			idx = 0
 			for j in range(self.m+1):
 				if isnan(X[self.m-j]):
-					is_na = 1
+					log_probability[i] = 0.
+					break
 
 				idx += self.idxs[j] * <int> X[self.m-j]
-
-			if is_na == 1:
-				log_probability[i] = 0
 			else:
 				log_probability[i] = self.values[idx]
 
@@ -182,7 +186,6 @@ cdef class JointProbabilityTable(MultivariateDistribution):
 
 		return DiscreteDistribution(d)
 
-
 	def summarize(self, items, weights=None):
 		"""Summarize the data into sufficient statistics to store."""
 
@@ -205,33 +208,29 @@ cdef class JointProbabilityTable(MultivariateDistribution):
 		for i in range(n):
 			item = tuple(items[i])
 
-			if 'nan' in item or numpy.nan in item or None in item:
+			if _check_nan(item):
 				continue
 
 			key = self.keymap[item]
 			self.counts[key] += weights[i]
+			self.count += weights[i]
 
 	cdef double _summarize(self, double* items, double* weights, int n,
 		int column_idx, int d) nogil:
-		cdef int i, j, idx, is_na
+		cdef int i, j, idx
 		cdef double count = 0
 		cdef double* counts = <double*> calloc(self.n, sizeof(double))
 
-		memset(counts, 0, self.n*sizeof(double))
-
 		for i in range(n):
-			idx, is_na = 0, 0
+			idx = 0
 			for j in range(self.m+1):
 				if isnan(items[self.m-i]):
-					is_na = 1
+					break
 
 				idx += self.idxs[i] * <int> items[self.m-i]
-
-			if is_na == 1:
-				continue
-
-			counts[idx] += weights[i]
-			count += weights[i]
+			else:
+				counts[idx] += weights[i]
+				count += weights[i]
 
 		with gil:
 			self.count += count
@@ -240,21 +239,21 @@ cdef class JointProbabilityTable(MultivariateDistribution):
 
 		free(counts)
 
-	def from_summaries(self, double inertia=0.0, double pseudocount=0.0):
-		"""Update the parameters of the distribution using sufficient statistics."""
+	def from_summaries(self, inertia=0.0, pseudocount=0.0):
+		"""Update the parameters of the table."""
 
 		cdef int i, k
-		cdef double p = pseudocount
 
 		w_sum = sum(self.counts[i] for i in range(self.n))
 		if w_sum < 1e-7:
 			return
 
-		with nogil:
-			for i in range(self.n):
-				probability = ((self.counts[i] + p) / (self.count + p * self.k))
-				self.values[i] = _log(cexp(self.values[i])*inertia +
-					probability*(1-inertia))
+		for i in range(self.n):
+			probability = ((self.counts[i] + pseudocount) / 
+				(self.count + pseudocount * self.k))
+			
+			self.values[i] = _log(cexp(self.values[i])*inertia +
+				probability*(1-inertia))
 
 		for i in range(self.n):
 			self.parameters[0][i][-1] = cexp(self.values[i])
@@ -265,8 +264,7 @@ cdef class JointProbabilityTable(MultivariateDistribution):
 		"""Clear the summary statistics stored in the object."""
 
 		self.count = 0
-		with nogil:
-			memset(self.counts, 0, self.n*sizeof(double))
+		memset(self.counts, 0, self.n*sizeof(double))
 
 	def fit(self, items, weights=None, inertia=0.0, pseudocount=0.0):
 		"""Update the parameters of the table based on the data."""
@@ -274,51 +272,35 @@ cdef class JointProbabilityTable(MultivariateDistribution):
 		self.summarize(items, weights)
 		self.from_summaries(inertia, pseudocount)
 
-	def to_json(self, separators=(',', ' : '), indent=4):
-		"""Serialize the model to a JSON.
-
-		Parameters
-		----------
-		separators : tuple, optional
-		    The two separators to pass to the json.dumps function for formatting.
-		    Default is (',', ' : ').
-
-		indent : int, optional
-		    The indentation to use at each level. Passed to json.dumps for
-		    formatting. Default is 4.
-
-		Returns
-		-------
-		json : str
-		    A properly formatted JSON object.
-		"""
-
+	def to_dict(self):
 		table = [list(key + tuple([cexp(self.values[i])])) for key, i in self.keymap.items()]
 
-		model = {
-					'class' : 'Distribution',
-		            'name' : 'JointProbabilityTable',
-		            'table' : table,
-		            'dtypes' : self.dtypes,
-		            'parents' : [json.loads(dist.to_json()) for dist in self.parameters[1]]
-		        }
-
-		return json.dumps(model, separators=separators, indent=indent)
+		return {
+			'class' : 'Distribution',
+			'name' : 'JointProbabilityTable',
+			'table' : table,
+			'dtypes' : self.dtypes,
+			'parents' : [dist if isinstance(dist, int) else dist.to_dict() for dist in self.parameters[1]]
+		}
 
 	@classmethod
-	def from_samples(cls, X, parents, weights=None, pseudocount=0.0):
+	def from_samples(cls, X, parents=None, weights=None, pseudocount=0.0, 
+		keys=None):
 		"""Learn the table from data."""
 
 		X = numpy.array(X)
 		n, d = X.shape
 
-		keys = [numpy.unique(X[:,i]) for i in range(d)]
-		m = numpy.prod([k.shape[0] for k in keys])
+		if parents is None:
+			parents = list(range(X.shape[1]))
+
+		keys = keys or [numpy.unique(X[:,i]).tolist() for i in range(d)]
+		m = numpy.prod([len(k) for k in keys])
 
 		table = []
 		for key in it.product(*keys):
 			table.append(list(key) + [1./m,])
 
-		d = JointProbabilityTable(table, parents)
+		d = cls(table, parents)
 		d.fit(X, weights, pseudocount=pseudocount)
 		return d
